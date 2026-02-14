@@ -23,6 +23,9 @@ CHISEL_AUTH="${HAPPYCAPY_CHISEL_AUTH:-user:ChiselPass2026}"
 REGISTRY_FILE="${HAPPYCAPY_REGISTRY_FILE:-happycapy_${ALIAS}.txt}"
 UPLOAD_API="${HAPPYCAPY_REGISTRY_UPLOAD_API:-https://file.zmkk.fun/api/upload}"
 REGISTRY_BASE="${HAPPYCAPY_REGISTRY_BASE:-https://file.zmkk.fun}"
+PERSIST_DIR="${HOME}/.happycapy"
+PERSIST_BOOTSTRAP="${PERSIST_DIR}/bootstrap.sh"
+RECOVER_SCRIPT_PATH="${HOME}/.local/bin/happycapy-recover.sh"
 
 SUPERVISOR_MANAGED=0
 CHISEL_OK=0
@@ -448,6 +451,49 @@ query_preview_url() {
   return 1
 }
 
+install_recover_script() {
+  mkdir -p "$PERSIST_DIR" "$HOME/.local/bin"
+
+  if [ -f "$0" ] && [ -r "$0" ]; then
+    install -m 700 "$0" "$PERSIST_BOOTSTRAP" || true
+  elif [ -f /tmp/hc-remote-bootstrap.sh ] && [ -r /tmp/hc-remote-bootstrap.sh ]; then
+    install -m 700 /tmp/hc-remote-bootstrap.sh "$PERSIST_BOOTSTRAP" || true
+  fi
+
+  if [ ! -f "$PERSIST_BOOTSTRAP" ]; then
+    return 1
+  fi
+
+  cat > "$RECOVER_SCRIPT_PATH" <<EOF2
+#!/usr/bin/env bash
+set -euo pipefail
+
+export HAPPYCAPY_ACCESS_TOKEN="\${HAPPYCAPY_ACCESS_TOKEN:-${ACCESS_TOKEN}}"
+export HAPPYCAPY_ALIAS="\${HAPPYCAPY_ALIAS:-${ALIAS}}"
+export HAPPYCAPY_SSH_USER="\${HAPPYCAPY_SSH_USER:-${SSH_USER}}"
+export HAPPYCAPY_SSH_PASSWORD="\${HAPPYCAPY_SSH_PASSWORD:-${SSH_PASSWORD}}"
+export HAPPYCAPY_SSH_PORT="\${HAPPYCAPY_SSH_PORT:-${SSH_PORT}}"
+export HAPPYCAPY_LOCAL_PORT="\${HAPPYCAPY_LOCAL_PORT:-${LOCAL_PORT}}"
+export HAPPYCAPY_CHISEL_AUTH="\${HAPPYCAPY_CHISEL_AUTH:-${CHISEL_AUTH}}"
+export HAPPYCAPY_REGISTRY_FILE="\${HAPPYCAPY_REGISTRY_FILE:-${REGISTRY_FILE}}"
+export HAPPYCAPY_REGISTRY_UPLOAD_API="\${HAPPYCAPY_REGISTRY_UPLOAD_API:-${UPLOAD_API}}"
+export HAPPYCAPY_REGISTRY_BASE="\${HAPPYCAPY_REGISTRY_BASE:-${REGISTRY_BASE}}"
+export HAPPYCAPY_RECOVER_CHAIN=1
+
+if [ -x "${PERSIST_BOOTSTRAP}" ]; then
+  exec bash "${PERSIST_BOOTSTRAP}"
+fi
+if [ -x /tmp/hc-remote-bootstrap.sh ]; then
+  exec bash /tmp/hc-remote-bootstrap.sh
+fi
+echo '{"status":"error","message":"bootstrap cache missing for recover"}'
+exit 1
+EOF2
+
+  chmod 700 "$RECOVER_SCRIPT_PATH"
+  echo "$RECOVER_SCRIPT_PATH"
+}
+
 verify_services() {
   if [ "$(chisel_state)" = "desired" ] && is_port_listening 8080; then
     CHISEL_OK=1
@@ -471,6 +517,22 @@ verify_services() {
 
 if [ -z "$ACCESS_TOKEN" ]; then
   emit_error "HAPPYCAPY_ACCESS_TOKEN is empty"
+  exit 1
+fi
+
+if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [ -x "$RECOVER_SCRIPT_PATH" ]; then
+  set +e
+  HAPPYCAPY_RECOVER_CHAIN=1 bash "$RECOVER_SCRIPT_PATH"
+  pre_recover_rc=$?
+  set -e
+  if [ "$pre_recover_rc" -eq 0 ]; then
+    exit 0
+  fi
+fi
+
+RECOVER_SCRIPT="$(install_recover_script || true)"
+if [ -z "$RECOVER_SCRIPT" ] || [ ! -x "$RECOVER_SCRIPT" ]; then
+  emit_error "failed to create recover script"
   exit 1
 fi
 
@@ -514,7 +576,7 @@ if [ -f "$HOME/.happycapy_registry_url" ]; then
   REGISTRY_URL="$(head -n1 "$HOME/.happycapy_registry_url" | tr -d '\r')"
 fi
 
-printf '{"status":"ok","alias":"%s","chisel_server":"%s","chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s}\n' \
+printf '{"status":"ok","alias":"%s","chisel_server":"%s","chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s}\n' \
   "$(json_escape "$ALIAS")" \
   "$(json_escape "${CHISEL_SERVER}")" \
   "$(json_escape "$CHISEL_AUTH")" \
@@ -524,6 +586,8 @@ printf '{"status":"ok","alias":"%s","chisel_server":"%s","chisel_auth":"%s","ssh
   "$LOCAL_PORT" \
   "$(json_escape "$REGISTRY_FILE")" \
   "$(json_escape "$REGISTRY_URL")" \
+  "$(json_escape "${RECOVER_SCRIPT_PATH}")" \
+  "$(json_escape "${PERSIST_BOOTSTRAP}")" \
   "$SUPERVISOR_MANAGED" \
   "$CHISEL_OK" \
   "$SSHD_OK"
