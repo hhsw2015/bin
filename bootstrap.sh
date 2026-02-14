@@ -55,6 +55,11 @@ run_root() {
   fi
 }
 
+is_port_listening() {
+  local port="$1"
+  ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+}
+
 find_sshd_bin() {
   if command -v sshd >/dev/null 2>&1; then
     command -v sshd
@@ -242,6 +247,7 @@ configure_sshd() {
     return 0
   fi
 
+  run_root ssh-keygen -A >/dev/null 2>&1 || true
   run_root mkdir -p /var/run/sshd
   set_sshd_option "PasswordAuthentication" "yes" || true
   set_sshd_option "PermitRootLogin" "yes" || true
@@ -389,7 +395,7 @@ start_fallback_processes() {
   fi
 
   if [ -n "$sshd_bin" ] && can_root; then
-    if ! pgrep -af "sshd -D -p ${SSH_PORT}" >/dev/null 2>&1; then
+    if ! is_port_listening "$SSH_PORT"; then
       nohup "$sshd_bin" -D -p "$SSH_PORT" >/tmp/happycapy-sshd.log 2>&1 &
       sleep 1
     fi
@@ -397,6 +403,11 @@ start_fallback_processes() {
 
   case "$(chisel_state)" in
     desired)
+      if ! is_port_listening 8080; then
+        pkill -f "chisel server.*--port 8080" >/dev/null 2>&1 || true
+        sleep 1
+        nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
+      fi
       ;;
     other)
       pkill -f "chisel server.*--port 8080" >/dev/null 2>&1 || true
@@ -438,14 +449,14 @@ query_preview_url() {
 }
 
 verify_services() {
-  if [ "$(chisel_state)" = "desired" ]; then
+  if [ "$(chisel_state)" = "desired" ] && is_port_listening 8080; then
     CHISEL_OK=1
   else
     CHISEL_OK=0
   fi
 
   if find_sshd_bin >/dev/null 2>&1; then
-    if pgrep -af "sshd -D -p ${SSH_PORT}" >/dev/null 2>&1; then
+    if is_port_listening "$SSH_PORT"; then
       SSHD_OK=1
     else
       SSHD_OK=0
