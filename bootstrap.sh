@@ -411,7 +411,7 @@ start_fallback_processes() {
 
   if [ -n "$sshd_bin" ] && can_root; then
     if ! is_port_listening "$SSH_PORT"; then
-      nohup "$sshd_bin" -D -p "$SSH_PORT" >/tmp/happycapy-sshd.log 2>&1 &
+      run_root sh -c "nohup '$sshd_bin' -D -p '$SSH_PORT' >/tmp/happycapy-sshd.log 2>&1 &"
       sleep 1
     fi
   fi
@@ -467,7 +467,9 @@ install_recover_script() {
   mkdir -p "$PERSIST_DIR" "$HOME/.local/bin"
 
   if [ -f "$0" ] && [ -r "$0" ]; then
-    install -m 700 "$0" "$PERSIST_BOOTSTRAP" || true
+    if [ "$0" != "$PERSIST_BOOTSTRAP" ]; then
+      install -m 700 "$0" "$PERSIST_BOOTSTRAP" || true
+    fi
   elif [ -f /tmp/hc-remote-bootstrap.sh ] && [ -r /tmp/hc-remote-bootstrap.sh ]; then
     install -m 700 /tmp/hc-remote-bootstrap.sh "$PERSIST_BOOTSTRAP" || true
   fi
