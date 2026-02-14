@@ -23,9 +23,18 @@ CHISEL_AUTH="${HAPPYCAPY_CHISEL_AUTH:-user:ChiselPass2026}"
 REGISTRY_FILE="${HAPPYCAPY_REGISTRY_FILE:-happycapy_${ALIAS}.txt}"
 UPLOAD_API="${HAPPYCAPY_REGISTRY_UPLOAD_API:-https://file.zmkk.fun/api/upload}"
 REGISTRY_BASE="${HAPPYCAPY_REGISTRY_BASE:-https://file.zmkk.fun}"
-PERSIST_DIR="${HOME}/.happycapy"
+PERSIST_ROOT="${HAPPYCAPY_PERSIST_ROOT:-}"
+if [ -z "$PERSIST_ROOT" ]; then
+  if [ -d /home/node/a0/workspace ]; then
+    PERSIST_ROOT="/home/node/a0/workspace"
+  else
+    PERSIST_ROOT="$HOME"
+  fi
+fi
+PERSIST_DIR="${PERSIST_ROOT}/.happycapy"
 PERSIST_BOOTSTRAP="${PERSIST_DIR}/bootstrap.sh"
-RECOVER_SCRIPT_PATH="${HOME}/.local/bin/happycapy-recover.sh"
+RECOVER_SCRIPT_PATH="${HAPPYCAPY_RECOVER_SCRIPT:-${PERSIST_DIR}/happycapy-recover.sh}"
+LEGACY_RECOVER_SCRIPT="${HOME}/.local/bin/happycapy-recover.sh"
 OUTPUT_MODE="${HAPPYCAPY_OUTPUT_MODE:-}"
 if [ -z "$OUTPUT_MODE" ]; then
   if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" = "1" ]; then
@@ -464,7 +473,7 @@ query_preview_url() {
 }
 
 install_recover_script() {
-  mkdir -p "$PERSIST_DIR" "$HOME/.local/bin"
+  mkdir -p "$PERSIST_DIR" "$(dirname "$RECOVER_SCRIPT_PATH")" "$HOME/.local/bin"
 
   if [ -f "$0" ] && [ -r "$0" ]; then
     if [ "$0" != "$PERSIST_BOOTSTRAP" ]; then
@@ -492,6 +501,7 @@ export HAPPYCAPY_CHISEL_AUTH="\${HAPPYCAPY_CHISEL_AUTH:-${CHISEL_AUTH}}"
 export HAPPYCAPY_REGISTRY_FILE="\${HAPPYCAPY_REGISTRY_FILE:-${REGISTRY_FILE}}"
 export HAPPYCAPY_REGISTRY_UPLOAD_API="\${HAPPYCAPY_REGISTRY_UPLOAD_API:-${UPLOAD_API}}"
 export HAPPYCAPY_REGISTRY_BASE="\${HAPPYCAPY_REGISTRY_BASE:-${REGISTRY_BASE}}"
+export HAPPYCAPY_RECOVER_SCRIPT="\${HAPPYCAPY_RECOVER_SCRIPT:-${RECOVER_SCRIPT_PATH}}"
 export HAPPYCAPY_RECOVER_CHAIN=1
 
 if [ -x "${PERSIST_BOOTSTRAP}" ]; then
@@ -505,6 +515,9 @@ exit 1
 EOF2
 
   chmod 700 "$RECOVER_SCRIPT_PATH"
+  if [ "$RECOVER_SCRIPT_PATH" != "$LEGACY_RECOVER_SCRIPT" ]; then
+    install -m 700 "$RECOVER_SCRIPT_PATH" "$LEGACY_RECOVER_SCRIPT" 2>/dev/null || true
+  fi
   echo "$RECOVER_SCRIPT_PATH"
 }
 
@@ -534,9 +547,16 @@ if [ -z "$ACCESS_TOKEN" ]; then
   exit 1
 fi
 
-if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [ -x "$RECOVER_SCRIPT_PATH" ]; then
+RECOVER_EXISTING=""
+if [ -x "$RECOVER_SCRIPT_PATH" ]; then
+  RECOVER_EXISTING="$RECOVER_SCRIPT_PATH"
+elif [ -x "$LEGACY_RECOVER_SCRIPT" ]; then
+  RECOVER_EXISTING="$LEGACY_RECOVER_SCRIPT"
+fi
+
+if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [ -n "$RECOVER_EXISTING" ]; then
   set +e
-  HAPPYCAPY_RECOVER_CHAIN=1 bash "$RECOVER_SCRIPT_PATH"
+  HAPPYCAPY_RECOVER_CHAIN=1 bash "$RECOVER_EXISTING"
   pre_recover_rc=$?
   set -e
   if [ "$pre_recover_rc" -eq 0 ]; then
