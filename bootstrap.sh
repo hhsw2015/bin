@@ -25,9 +25,13 @@ UPLOAD_API="${HAPPYCAPY_REGISTRY_UPLOAD_API:-https://file.zmkk.fun/api/upload}"
 REGISTRY_BASE="${HAPPYCAPY_REGISTRY_BASE:-https://file.zmkk.fun}"
 PERSIST_ROOT="${HAPPYCAPY_PERSIST_ROOT:-}"
 if [ -z "$PERSIST_ROOT" ]; then
-  if [ -d /home/node/a0/workspace ]; then
-    PERSIST_ROOT="/home/node/a0/workspace"
-  else
+  for d in /home/node/*/workspace /home/node/workspace; do
+    if [ -d "$d" ]; then
+      PERSIST_ROOT="$d"
+      break
+    fi
+  done
+  if [ -z "$PERSIST_ROOT" ]; then
     PERSIST_ROOT="$HOME"
   fi
 fi
