@@ -38,10 +38,8 @@ fi
 PERSIST_DIR="${PERSIST_ROOT}/.happycapy"
 PERSIST_BOOTSTRAP="${PERSIST_DIR}/bootstrap.sh"
 RECOVER_SCRIPT_PATH="${HAPPYCAPY_RECOVER_SCRIPT:-${PERSIST_DIR}/happycapy-recover.sh}"
-LEGACY_RECOVER_SCRIPT="${HOME}/.local/bin/happycapy-recover.sh"
 WORKSPACE_RECOVER_GLOB="/home/node/*/workspace/.happycapy/happycapy-recover.sh"
 REGISTRY_URL_PATH="${HAPPYCAPY_REGISTRY_URL_PATH:-${PERSIST_DIR}/registry_url.txt}"
-LEGACY_REGISTRY_URL_PATH="${HOME}/.happycapy_registry_url"
 OUTPUT_MODE="${HAPPYCAPY_OUTPUT_MODE:-}"
 if [ -z "$OUTPUT_MODE" ]; then
   if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" = "1" ]; then
@@ -307,7 +305,6 @@ REGISTRY_FILE="${REGISTRY_FILE}"
 UPLOAD_API="${UPLOAD_API}"
 REGISTRY_BASE="${REGISTRY_BASE}"
 REGISTRY_URL_PATH="${REGISTRY_URL_PATH}"
-LEGACY_REGISTRY_URL_PATH="${LEGACY_REGISTRY_URL_PATH}"
 
 resp="\$(curl -sS -m 20 -X POST "https://happycapy.ai/api/export-port" \\
   -H "Authorization: Bearer \$ACCESS_TOKEN" \\
@@ -333,9 +330,6 @@ while [ "\$attempt" -le 3 ]; do
   if [ -n "\$rel" ]; then
     mkdir -p "\$(dirname "\$REGISTRY_URL_PATH")" 2>/dev/null || true
     printf '%s\n' "\${REGISTRY_BASE}/\${rel#/}" > "\$REGISTRY_URL_PATH"
-    if [ "\$REGISTRY_URL_PATH" != "\$LEGACY_REGISTRY_URL_PATH" ]; then
-      printf '%s\n' "\${REGISTRY_BASE}/\${rel#/}" > "\$LEGACY_REGISTRY_URL_PATH" 2>/dev/null || true
-    fi
     exit 0
   fi
   attempt=\$((attempt + 1))
@@ -345,10 +339,9 @@ done
 exit 0
 EOF2
 
-  mkdir -p "$PERSIST_DIR" "$HOME/.local/bin"
+  mkdir -p "$PERSIST_DIR"
   writer="$PERSIST_DIR/happycapy-report-registry.sh"
   install -m 700 "$tmp_writer" "$writer"
-  install -m 700 "$tmp_writer" "$HOME/.local/bin/happycapy-report-registry.sh" 2>/dev/null || true
 
   rm -f "$tmp_writer"
   echo "$writer"
@@ -487,7 +480,7 @@ query_preview_url() {
 }
 
 install_recover_script() {
-  mkdir -p "$PERSIST_DIR" "$(dirname "$RECOVER_SCRIPT_PATH")" "$HOME/.local/bin"
+  mkdir -p "$PERSIST_DIR" "$(dirname "$RECOVER_SCRIPT_PATH")"
 
   if [ -f "$0" ] && [ -r "$0" ]; then
     if [ "$0" != "$PERSIST_BOOTSTRAP" ]; then
@@ -530,9 +523,6 @@ exit 1
 EOF2
 
   chmod 700 "$RECOVER_SCRIPT_PATH"
-  if [ "$RECOVER_SCRIPT_PATH" != "$LEGACY_RECOVER_SCRIPT" ]; then
-    install -m 700 "$RECOVER_SCRIPT_PATH" "$LEGACY_RECOVER_SCRIPT" 2>/dev/null || true
-  fi
   echo "$RECOVER_SCRIPT_PATH"
 }
 
@@ -570,11 +560,6 @@ else
   if [ -n "$R0" ] && [ -x "$R0" ]; then
     RECOVER_EXISTING="$R0"
   fi
-fi
-if [ -z "$RECOVER_EXISTING" ] && [ -x /usr/local/bin/happycapy-recover.sh ]; then
-  RECOVER_EXISTING="/usr/local/bin/happycapy-recover.sh"
-elif [ -z "$RECOVER_EXISTING" ] && [ -x "$LEGACY_RECOVER_SCRIPT" ]; then
-  RECOVER_EXISTING="$LEGACY_RECOVER_SCRIPT"
 fi
 
 if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [ -n "$RECOVER_EXISTING" ]; then
@@ -631,8 +616,6 @@ CHISEL_SERVER="$(query_preview_url || true)"
 REGISTRY_URL=""
 if [ -f "$REGISTRY_URL_PATH" ]; then
   REGISTRY_URL="$(head -n1 "$REGISTRY_URL_PATH" | tr -d '\r')"
-elif [ -f "$LEGACY_REGISTRY_URL_PATH" ]; then
-  REGISTRY_URL="$(head -n1 "$LEGACY_REGISTRY_URL_PATH" | tr -d '\r')"
 fi
 
 if [ "$OUTPUT_MODE" = "short" ]; then
