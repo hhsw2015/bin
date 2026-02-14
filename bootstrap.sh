@@ -39,6 +39,9 @@ PERSIST_DIR="${PERSIST_ROOT}/.happycapy"
 PERSIST_BOOTSTRAP="${PERSIST_DIR}/bootstrap.sh"
 RECOVER_SCRIPT_PATH="${HAPPYCAPY_RECOVER_SCRIPT:-${PERSIST_DIR}/happycapy-recover.sh}"
 LEGACY_RECOVER_SCRIPT="${HOME}/.local/bin/happycapy-recover.sh"
+WORKSPACE_RECOVER_GLOB="/home/node/*/workspace/.happycapy/happycapy-recover.sh"
+REGISTRY_URL_PATH="${HAPPYCAPY_REGISTRY_URL_PATH:-${PERSIST_DIR}/registry_url.txt}"
+LEGACY_REGISTRY_URL_PATH="${HOME}/.happycapy_registry_url"
 OUTPUT_MODE="${HAPPYCAPY_OUTPUT_MODE:-}"
 if [ -z "$OUTPUT_MODE" ]; then
   if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" = "1" ]; then
@@ -303,6 +306,8 @@ LOCAL_PORT="${LOCAL_PORT}"
 REGISTRY_FILE="${REGISTRY_FILE}"
 UPLOAD_API="${UPLOAD_API}"
 REGISTRY_BASE="${REGISTRY_BASE}"
+REGISTRY_URL_PATH="${REGISTRY_URL_PATH}"
+LEGACY_REGISTRY_URL_PATH="${LEGACY_REGISTRY_URL_PATH}"
 
 resp="\$(curl -sS -m 20 -X POST "https://happycapy.ai/api/export-port" \\
   -H "Authorization: Bearer \$ACCESS_TOKEN" \\
@@ -326,7 +331,11 @@ while [ "\$attempt" -le 3 ]; do
   up="\$(curl -sS -m 20 -F "file=@\${tmpf};filename=\${REGISTRY_FILE};type=text/plain" "\$UPLOAD_API" || true)"
   rel="\$(printf '%s' "\$up" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\\([^\"]*\\)".*/\\1/p' | head -n1)"
   if [ -n "\$rel" ]; then
-    printf '%s\n' "\${REGISTRY_BASE}/\${rel#/}" > "\$HOME/.happycapy_registry_url"
+    mkdir -p "\$(dirname "\$REGISTRY_URL_PATH")" 2>/dev/null || true
+    printf '%s\n' "\${REGISTRY_BASE}/\${rel#/}" > "\$REGISTRY_URL_PATH"
+    if [ "\$REGISTRY_URL_PATH" != "\$LEGACY_REGISTRY_URL_PATH" ]; then
+      printf '%s\n' "\${REGISTRY_BASE}/\${rel#/}" > "\$LEGACY_REGISTRY_URL_PATH" 2>/dev/null || true
+    fi
     exit 0
   fi
   attempt=\$((attempt + 1))
@@ -336,9 +345,10 @@ done
 exit 0
 EOF2
 
-  mkdir -p "$HOME/.local/bin"
-  writer="$HOME/.local/bin/happycapy-report-registry.sh"
+  mkdir -p "$PERSIST_DIR" "$HOME/.local/bin"
+  writer="$PERSIST_DIR/happycapy-report-registry.sh"
   install -m 700 "$tmp_writer" "$writer"
+  install -m 700 "$tmp_writer" "$HOME/.local/bin/happycapy-report-registry.sh" 2>/dev/null || true
 
   rm -f "$tmp_writer"
   echo "$writer"
@@ -505,6 +515,7 @@ export HAPPYCAPY_CHISEL_AUTH="\${HAPPYCAPY_CHISEL_AUTH:-${CHISEL_AUTH}}"
 export HAPPYCAPY_REGISTRY_FILE="\${HAPPYCAPY_REGISTRY_FILE:-${REGISTRY_FILE}}"
 export HAPPYCAPY_REGISTRY_UPLOAD_API="\${HAPPYCAPY_REGISTRY_UPLOAD_API:-${UPLOAD_API}}"
 export HAPPYCAPY_REGISTRY_BASE="\${HAPPYCAPY_REGISTRY_BASE:-${REGISTRY_BASE}}"
+export HAPPYCAPY_REGISTRY_URL_PATH="\${HAPPYCAPY_REGISTRY_URL_PATH:-${REGISTRY_URL_PATH}}"
 export HAPPYCAPY_RECOVER_SCRIPT="\${HAPPYCAPY_RECOVER_SCRIPT:-${RECOVER_SCRIPT_PATH}}"
 export HAPPYCAPY_RECOVER_CHAIN=1
 
@@ -554,7 +565,15 @@ fi
 RECOVER_EXISTING=""
 if [ -x "$RECOVER_SCRIPT_PATH" ]; then
   RECOVER_EXISTING="$RECOVER_SCRIPT_PATH"
-elif [ -x "$LEGACY_RECOVER_SCRIPT" ]; then
+else
+  R0="$(ls -1 $WORKSPACE_RECOVER_GLOB 2>/dev/null | head -n1 || true)"
+  if [ -n "$R0" ] && [ -x "$R0" ]; then
+    RECOVER_EXISTING="$R0"
+  fi
+fi
+if [ -z "$RECOVER_EXISTING" ] && [ -x /usr/local/bin/happycapy-recover.sh ]; then
+  RECOVER_EXISTING="/usr/local/bin/happycapy-recover.sh"
+elif [ -z "$RECOVER_EXISTING" ] && [ -x "$LEGACY_RECOVER_SCRIPT" ]; then
   RECOVER_EXISTING="$LEGACY_RECOVER_SCRIPT"
 fi
 
@@ -610,8 +629,10 @@ CHISEL_SERVER="$(query_preview_url || true)"
 "$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1 || true
 
 REGISTRY_URL=""
-if [ -f "$HOME/.happycapy_registry_url" ]; then
-  REGISTRY_URL="$(head -n1 "$HOME/.happycapy_registry_url" | tr -d '\r')"
+if [ -f "$REGISTRY_URL_PATH" ]; then
+  REGISTRY_URL="$(head -n1 "$REGISTRY_URL_PATH" | tr -d '\r')"
+elif [ -f "$LEGACY_REGISTRY_URL_PATH" ]; then
+  REGISTRY_URL="$(head -n1 "$LEGACY_REGISTRY_URL_PATH" | tr -d '\r')"
 fi
 
 if [ "$OUTPUT_MODE" = "short" ]; then
