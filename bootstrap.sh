@@ -29,6 +29,8 @@ if [ -z "$ACCESS_TOKEN" ]; then
   exit 1
 fi
 
+SUPERVISOR_MANAGED=0
+
 can_root() {
   if [ "$(id -u)" -eq 0 ]; then
     return 0
@@ -45,6 +47,11 @@ run_root() {
   else
     sudo "$@"
   fi
+}
+
+has_cmdline_substr() {
+  local needle="$1"
+  ps -eo command= | grep -F -- "$needle" >/dev/null 2>&1
 }
 
 install_packages() {
@@ -188,6 +195,9 @@ setup_supervisor() {
   if [ ! -d "$conf_dir" ]; then
     return 0
   fi
+  if ! run_root supervisorctl status >/dev/null 2>&1; then
+    return 0
+  fi
 
   cat > /tmp/happycapy-chisel.conf <<EOF
 [program:happycapy-chisel]
@@ -231,6 +241,7 @@ EOF
     run_root supervisorctl restart happycapy-sshd || run_root supervisorctl start happycapy-sshd || true
   fi
   run_root supervisorctl start happycapy-registry-report || true
+  SUPERVISOR_MANAGED=1
 }
 
 start_fallback_processes() {
@@ -238,12 +249,27 @@ start_fallback_processes() {
   local writer="$2"
   local sshd_bin
   sshd_bin="$(command -v sshd || true)"
-  if [ -n "$sshd_bin" ] && can_root; then
-    pkill -f "sshd -D -p ${SSH_PORT}" >/dev/null 2>&1 || true
-    nohup "$sshd_bin" -D -p "$SSH_PORT" >/tmp/happycapy-sshd.log 2>&1 &
+  if [ "$SUPERVISOR_MANAGED" -eq 1 ]; then
+    bash "$writer" >/tmp/happycapy-registry-report.log 2>&1 || true
+    return 0
   fi
-  pkill -f "chisel server --port 8080" >/dev/null 2>&1 || true
-  nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --reverse --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
+
+  if [ -n "$sshd_bin" ] && can_root; then
+    if ! has_cmdline_substr "sshd -D -p ${SSH_PORT}"; then
+      nohup "$sshd_bin" -D -p "$SSH_PORT" >/tmp/happycapy-sshd.log 2>&1 &
+    fi
+  fi
+
+  if has_cmdline_substr "chisel server --port 8080 --auth ${CHISEL_AUTH} --reverse"; then
+    :
+  else
+    if has_cmdline_substr "chisel server --port 8080"; then
+      pkill -f "chisel server --port 8080" >/dev/null 2>&1 || true
+      sleep 1
+    fi
+    nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --reverse --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
+  fi
+
   bash "$writer" >/tmp/happycapy-registry-report.log 2>&1 || true
 }
 
@@ -282,4 +308,4 @@ if [ -z "$CHISEL_SERVER" ]; then
   CHISEL_SERVER=""
 fi
 
-echo "{\"status\":\"ok\",\"alias\":\"${ALIAS}\",\"chisel_server\":\"${CHISEL_SERVER}\",\"chisel_auth\":\"${CHISEL_AUTH}\",\"ssh_user\":\"${SSH_USER}\",\"ssh_password\":\"${SSH_PASSWORD}\",\"ssh_port\":${SSH_PORT},\"local_port\":${LOCAL_PORT},\"registry_file\":\"${REGISTRY_FILE}\"}"
+echo "{\"status\":\"ok\",\"alias\":\"${ALIAS}\",\"chisel_server\":\"${CHISEL_SERVER}\",\"chisel_auth\":\"${CHISEL_AUTH}\",\"ssh_user\":\"${SSH_USER}\",\"ssh_password\":\"${SSH_PASSWORD}\",\"ssh_port\":${SSH_PORT},\"local_port\":${LOCAL_PORT},\"registry_file\":\"${REGISTRY_FILE}\",\"supervisor_managed\":${SUPERVISOR_MANAGED}}"
