@@ -201,8 +201,12 @@ install_chisel() {
     *) return 1 ;;
   esac
 
-  local url tmp_gz tmp_bin ok
-  url="https://github.com/jpillora/chisel/releases/latest/download/chisel_linux_${arch}.gz"
+  local url tmp_gz tmp_bin ok rel_json
+  rel_json="$(curl -fsSL --retry 2 --retry-delay 1 https://api.github.com/repos/jpillora/chisel/releases/latest 2>/dev/null || true)"
+  url="$(printf '%s' "$rel_json" | sed 's/,/\n/g' | sed -n "s|.*\"browser_download_url\"[[:space:]]*:[[:space:]]*\"\\([^\"]*chisel_[^\"]*_linux_${arch}\\.gz\\)\".*|\\1|p" | head -n1)"
+  if [ -z "$url" ]; then
+    url="https://github.com/jpillora/chisel/releases/latest/download/chisel_linux_${arch}.gz"
+  fi
   tmp_gz="$(mktemp /tmp/chisel.XXXXXX.gz)"
   tmp_bin="$(mktemp /tmp/chisel.XXXXXX)"
   ok=0
