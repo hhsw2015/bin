@@ -71,6 +71,26 @@ find_sshd_bin() {
   return 1
 }
 
+find_chisel_bin() {
+  if command -v chisel >/dev/null 2>&1; then
+    command -v chisel
+    return 0
+  fi
+  if [ -x /home/node/bin/chisel ]; then
+    printf '%s\n' /home/node/bin/chisel
+    return 0
+  fi
+  if [ -x /usr/local/bin/chisel ]; then
+    printf '%s\n' /usr/local/bin/chisel
+    return 0
+  fi
+  if [ -x "$HOME/.local/bin/chisel" ]; then
+    printf '%s\n' "$HOME/.local/bin/chisel"
+    return 0
+  fi
+  return 1
+}
+
 with_retry() {
   local max_try="$1"
   shift
@@ -151,7 +171,7 @@ install_packages() {
 
 install_chisel() {
   local chisel_bin
-  chisel_bin="$(command -v chisel || true)"
+  chisel_bin="$(find_chisel_bin || true)"
   if [ -n "$chisel_bin" ]; then
     echo "$chisel_bin"
     return 0
