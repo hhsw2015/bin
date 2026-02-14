@@ -49,9 +49,24 @@ run_root() {
   fi
 }
 
-has_cmdline_substr() {
-  local needle="$1"
-  ps -eo command= | grep -F -- "$needle" >/dev/null 2>&1
+chisel_state() {
+  local line found
+  found=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    found=1
+    case "$line" in
+      *"chisel server --port 8080"*"--auth ${CHISEL_AUTH}"*"--reverse"*)
+        echo "desired"
+        return 0
+        ;;
+    esac
+  done < <(pgrep -af "chisel server --port 8080" || true)
+  if [ "$found" -eq 1 ]; then
+    echo "other"
+  else
+    echo "none"
+  fi
 }
 
 install_packages() {
@@ -255,20 +270,23 @@ start_fallback_processes() {
   fi
 
   if [ -n "$sshd_bin" ] && can_root; then
-    if ! has_cmdline_substr "sshd -D -p ${SSH_PORT}"; then
+    if ! pgrep -af "sshd -D -p ${SSH_PORT}" >/dev/null 2>&1; then
       nohup "$sshd_bin" -D -p "$SSH_PORT" >/tmp/happycapy-sshd.log 2>&1 &
     fi
   fi
 
-  if has_cmdline_substr "chisel server --port 8080 --auth ${CHISEL_AUTH} --reverse"; then
-    :
-  else
-    if has_cmdline_substr "chisel server --port 8080"; then
+  case "$(chisel_state)" in
+    desired)
+      ;;
+    other)
       pkill -f "chisel server --port 8080" >/dev/null 2>&1 || true
       sleep 1
-    fi
-    nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --reverse --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
-  fi
+      nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --reverse --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
+      ;;
+    none)
+      nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --reverse --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
+      ;;
+  esac
 
   bash "$writer" >/tmp/happycapy-registry-report.log 2>&1 || true
 }
