@@ -26,6 +26,14 @@ REGISTRY_BASE="${HAPPYCAPY_REGISTRY_BASE:-https://file.zmkk.fun}"
 PERSIST_DIR="${HOME}/.happycapy"
 PERSIST_BOOTSTRAP="${PERSIST_DIR}/bootstrap.sh"
 RECOVER_SCRIPT_PATH="${HOME}/.local/bin/happycapy-recover.sh"
+OUTPUT_MODE="${HAPPYCAPY_OUTPUT_MODE:-}"
+if [ -z "$OUTPUT_MODE" ]; then
+  if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" = "1" ]; then
+    OUTPUT_MODE="short"
+  else
+    OUTPUT_MODE="full"
+  fi
+fi
 
 SUPERVISOR_MANAGED=0
 CHISEL_OK=0
@@ -576,18 +584,24 @@ if [ -f "$HOME/.happycapy_registry_url" ]; then
   REGISTRY_URL="$(head -n1 "$HOME/.happycapy_registry_url" | tr -d '\r')"
 fi
 
-printf '{"status":"ok","alias":"%s","chisel_server":"%s","chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s}\n' \
-  "$(json_escape "$ALIAS")" \
-  "$(json_escape "${CHISEL_SERVER}")" \
-  "$(json_escape "$CHISEL_AUTH")" \
-  "$(json_escape "$SSH_USER")" \
-  "$(json_escape "$SSH_PASSWORD")" \
-  "$SSH_PORT" \
-  "$LOCAL_PORT" \
-  "$(json_escape "$REGISTRY_FILE")" \
-  "$(json_escape "$REGISTRY_URL")" \
-  "$(json_escape "${RECOVER_SCRIPT_PATH}")" \
-  "$(json_escape "${PERSIST_BOOTSTRAP}")" \
-  "$SUPERVISOR_MANAGED" \
-  "$CHISEL_OK" \
-  "$SSHD_OK"
+if [ "$OUTPUT_MODE" = "short" ]; then
+  printf '{"status":"ok","chisel_server":"%s","recover_script":"%s"}\n' \
+    "$(json_escape "${CHISEL_SERVER}")" \
+    "$(json_escape "${RECOVER_SCRIPT_PATH}")"
+else
+  printf '{"status":"ok","alias":"%s","chisel_server":"%s","chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s}\n' \
+    "$(json_escape "$ALIAS")" \
+    "$(json_escape "${CHISEL_SERVER}")" \
+    "$(json_escape "$CHISEL_AUTH")" \
+    "$(json_escape "$SSH_USER")" \
+    "$(json_escape "$SSH_PASSWORD")" \
+    "$SSH_PORT" \
+    "$LOCAL_PORT" \
+    "$(json_escape "$REGISTRY_FILE")" \
+    "$(json_escape "$REGISTRY_URL")" \
+    "$(json_escape "${RECOVER_SCRIPT_PATH}")" \
+    "$(json_escape "${PERSIST_BOOTSTRAP}")" \
+    "$SUPERVISOR_MANAGED" \
+    "$CHISEL_OK" \
+    "$SSHD_OK"
+fi
