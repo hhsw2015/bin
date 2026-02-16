@@ -401,9 +401,13 @@ EOF2
 
   run_root supervisorctl reread >/dev/null 2>&1 || true
   run_root supervisorctl update >/dev/null 2>&1 || true
-  run_root supervisorctl restart happycapy-chisel >/dev/null 2>&1 || run_root supervisorctl start happycapy-chisel >/dev/null 2>&1 || true
+  if ! run_root supervisorctl status happycapy-chisel 2>/dev/null | grep -q RUNNING; then
+    run_root supervisorctl start happycapy-chisel >/dev/null 2>&1 || run_root supervisorctl restart happycapy-chisel >/dev/null 2>&1 || true
+  fi
   if [ -n "$sshd_bin" ]; then
-    run_root supervisorctl restart happycapy-sshd >/dev/null 2>&1 || run_root supervisorctl start happycapy-sshd >/dev/null 2>&1 || true
+    if ! run_root supervisorctl status happycapy-sshd 2>/dev/null | grep -q RUNNING; then
+      run_root supervisorctl start happycapy-sshd >/dev/null 2>&1 || run_root supervisorctl restart happycapy-sshd >/dev/null 2>&1 || true
+    fi
   fi
   run_root supervisorctl start happycapy-registry-report >/dev/null 2>&1 || true
   if run_root supervisorctl status happycapy-chisel >/dev/null 2>&1; then
