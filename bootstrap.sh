@@ -236,11 +236,11 @@ install_packages() {
   if command -v apt-get >/dev/null 2>&1; then
     with_retry 2 run_root apt-get update -y >/tmp/hc-apt-update.log 2>&1 || true
     with_retry 2 run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      curl ca-certificates gzip openssh-server supervisor >/tmp/hc-apt-install.log 2>&1 || true
+      curl ca-certificates gzip openssh-server supervisor nodejs >/tmp/hc-apt-install.log 2>&1 || true
   elif command -v apk >/dev/null 2>&1; then
-    with_retry 2 run_root apk add --no-cache curl gzip openssh supervisor >/tmp/hc-apk-install.log 2>&1 || true
+    with_retry 2 run_root apk add --no-cache curl gzip openssh supervisor nodejs >/tmp/hc-apk-install.log 2>&1 || true
   elif command -v yum >/dev/null 2>&1; then
-    with_retry 2 run_root yum install -y curl gzip openssh-server supervisor >/tmp/hc-yum-install.log 2>&1 || true
+    with_retry 2 run_root yum install -y curl gzip openssh-server supervisor nodejs >/tmp/hc-yum-install.log 2>&1 || true
   fi
 }
 
@@ -1065,6 +1065,10 @@ if ! command -v curl >/dev/null 2>&1; then
 fi
 
 CONTROL_API_BIN="$(command -v node || true)"
+if [ -z "$CONTROL_API_BIN" ]; then
+  emit_error "node not found (control api unavailable)"
+  exit 1
+fi
 
 CHISEL_BIN="$(install_chisel || true)"
 if [ -z "$CHISEL_BIN" ]; then
@@ -1086,8 +1090,11 @@ fi
 if [ -n "$CONTROL_API_BIN" ]; then
   write_control_api_server >/dev/null 2>&1 || true
 fi
-if [ -n "$CONTROL_API_BIN" ] && [ -x "$CONTROL_API_SCRIPT" ]; then
+if [ -x "$CONTROL_API_SCRIPT" ]; then
   CONTROL_API_REQUIRED=1
+else
+  emit_error "failed to create control api server script"
+  exit 1
 fi
 
 HEAL_MAX_ROUNDS_RAW="${HAPPYCAPY_HEAL_MAX_ROUNDS:-8}"
