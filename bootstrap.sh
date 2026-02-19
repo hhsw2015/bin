@@ -40,6 +40,10 @@ PERSIST_BOOTSTRAP="${PERSIST_DIR}/bootstrap.sh"
 RECOVER_SCRIPT_PATH="${HAPPYCAPY_RECOVER_SCRIPT:-${PERSIST_DIR}/happycapy-recover.sh}"
 WORKSPACE_RECOVER_GLOB="/home/node/*/workspace/.happycapy/happycapy-recover.sh"
 REGISTRY_URL_PATH="${HAPPYCAPY_REGISTRY_URL_PATH:-${PERSIST_DIR}/registry_url.txt}"
+CONTROL_PORT="${HAPPYCAPY_CONTROL_PORT:-18080}"
+CONTROL_API_SCRIPT="${PERSIST_DIR}/happycapy-control-api.js"
+CONTROL_API_PID_FILE="${PERSIST_DIR}/happycapy-control-api.pid"
+CONTROL_API_URL_PATH="${HAPPYCAPY_CONTROL_API_URL_PATH:-${PERSIST_DIR}/control_api_url.txt}"
 OUTPUT_MODE="${HAPPYCAPY_OUTPUT_MODE:-}"
 if [ -z "$OUTPUT_MODE" ]; then
   if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" = "1" ]; then
@@ -90,6 +94,8 @@ fi
 SUPERVISOR_MANAGED=0
 CHISEL_OK=0
 SSHD_OK=0
+CONTROL_API_OK=0
+CONTROL_API_BIN=""
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -343,6 +349,8 @@ REGISTRY_FILE="${REGISTRY_FILE}"
 UPLOAD_API="${UPLOAD_API}"
 REGISTRY_BASE="${REGISTRY_BASE}"
 REGISTRY_URL_PATH="${REGISTRY_URL_PATH}"
+CONTROL_PORT="${CONTROL_PORT}"
+CONTROL_API_URL_PATH="${CONTROL_API_URL_PATH}"
 EXPORT_PORT_TIMEOUT_SEC="${EXPORT_PORT_TIMEOUT_SEC}"
 UPLOAD_TIMEOUT_SEC="${UPLOAD_TIMEOUT_SEC}"
 
@@ -359,10 +367,22 @@ if [ -z "\$server" ]; then
   fi
   server="https://\${preview#https://}"
 fi
+control_url="\${HAPPYCAPY_CONTROL_API_URL:-}"
+if [ -z "\$control_url" ]; then
+  resp2="\$(curl -sS -m "\$EXPORT_PORT_TIMEOUT_SEC" -X POST "https://happycapy.ai/api/export-port" \\
+    -H "Authorization: Bearer \$ACCESS_TOKEN" \\
+    -H "Cookie: authToken=\$ACCESS_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    --data "{\\"port\\":\${CONTROL_PORT}}" || true)"
+  preview2="\$(printf '%s' "\$resp2" | sed -n 's/.*"previewUrl"[[:space:]]*:[[:space:]]*"\\([^\"]*\\)".*/\\1/p' | head -n1)"
+  if [ -n "\$preview2" ]; then
+    control_url="https://\${preview2#https://}"
+  fi
+fi
 now="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 tmpf="/tmp/\${REGISTRY_FILE}"
 cat > "\$tmpf" <<JSON
-{"schema":"happycapy-registry-v1","happycapy_username":"\$ALIAS","alias":"\$ALIAS","chisel_server":"\$server","chisel_auth":"\$CHISEL_AUTH","ssh_user":"\$SSH_USER","ssh_password":"\$SSH_PASSWORD","ssh_port":\$SSH_PORT,"local_port":\$LOCAL_PORT,"remote_port":\$SSH_PORT,"updated_at":"\$now","service_count":0,"services":[]}
+{"schema":"happycapy-registry-v1","happycapy_username":"\$ALIAS","alias":"\$ALIAS","chisel_server":"\$server","chisel_auth":"\$CHISEL_AUTH","ssh_user":"\$SSH_USER","ssh_password":"\$SSH_PASSWORD","ssh_port":\$SSH_PORT,"local_port":\$LOCAL_PORT,"remote_port":\$SSH_PORT,"control_api_port":\$CONTROL_PORT,"control_api_url":"\$control_url","updated_at":"\$now","service_count":0,"services":[]}
 JSON
 
 attempt=1
@@ -372,6 +392,10 @@ while [ "\$attempt" -le 2 ]; do
   if [ -n "\$rel" ]; then
     mkdir -p "\$(dirname "\$REGISTRY_URL_PATH")" 2>/dev/null || true
     printf '%s\n' "\${REGISTRY_BASE}/\${rel#/}" > "\$REGISTRY_URL_PATH"
+    if [ -n "\$control_url" ]; then
+      mkdir -p "\$(dirname "\$CONTROL_API_URL_PATH")" 2>/dev/null || true
+      printf '%s\n' "\$control_url" > "\$CONTROL_API_URL_PATH"
+    fi
     exit 0
   fi
   attempt=\$((attempt + 1))
@@ -387,6 +411,264 @@ EOF2
 
   rm -f "$tmp_writer"
   echo "$writer"
+}
+
+write_control_api_server() {
+  mkdir -p "$PERSIST_DIR"
+  cat > "$CONTROL_API_SCRIPT" <<'EOF2'
+#!/usr/bin/env node
+const http = require("http");
+const fs = require("fs");
+const { spawnSync } = require("child_process");
+const { URL } = require("url");
+
+const cfg = {
+  alias: process.env.HAPPYCAPY_ALIAS || "acc001",
+  token: process.env.HAPPYCAPY_ACCESS_TOKEN || "",
+  sshPort: Number(process.env.HAPPYCAPY_SSH_PORT || "2222"),
+  controlPort: Number(process.env.HAPPYCAPY_CONTROL_PORT || "18080"),
+  recoverScript: process.env.HAPPYCAPY_RECOVER_SCRIPT || "",
+  writer: process.env.HAPPYCAPY_REGISTRY_WRITER || "",
+  registryUrlPath: process.env.HAPPYCAPY_REGISTRY_URL_PATH || "",
+  controlApiUrlPath: process.env.HAPPYCAPY_CONTROL_API_URL_PATH || "",
+  exportTimeout: Number(process.env.HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC || "8"),
+};
+
+function runBash(script, timeoutMs = 15000, envExtra = {}) {
+  const ret = spawnSync("bash", ["-lc", script], {
+    encoding: "utf8",
+    timeout: timeoutMs,
+    maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, ...envExtra },
+  });
+  const out = `${ret.stdout || ""}${ret.stderr || ""}`;
+  return { ok: ret.status === 0, code: ret.status ?? -1, out };
+}
+
+function readText(path) {
+  if (!path) return "";
+  try {
+    return String(fs.readFileSync(path, "utf8")).trim();
+  } catch {
+    return "";
+  }
+}
+
+function exportPortUrl(port) {
+  if (!cfg.token || !port) return "";
+  const script = `
+resp="$(curl -sS -m "$EXPORT_TIMEOUT" -X POST "https://happycapy.ai/api/export-port" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Cookie: authToken=$TOKEN" \
+  -H "Content-Type: application/json" \
+  --data "{\\"port\\":$PORT}" || true)"
+preview="$(printf '%s' "$resp" | sed -n 's/.*"previewUrl"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -n1)"
+if [ -n "$preview" ]; then
+  printf 'https://%s' "${preview#https://}"
+fi
+`;
+  const res = runBash(script, 20000, {
+    TOKEN: cfg.token,
+    PORT: String(port),
+    EXPORT_TIMEOUT: String(Math.max(4, cfg.exportTimeout)),
+  });
+  return (res.out || "").trim().split(/\n/).filter(Boolean).pop() || "";
+}
+
+function runtimeState() {
+  const script = `
+r=0; rs="";
+if [ -x "$RECOVER_SCRIPT" ]; then r=1; rs="$RECOVER_SCRIPT"; fi
+if [ "$r" -eq 0 ]; then
+  for f in /home/node/*/workspace/.happycapy/happycapy-recover.sh; do
+    if [ -x "$f" ]; then r=1; rs="$f"; break; fi
+  done
+fi
+p2222=0; ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$SSH_PORT$" && p2222=1
+p8080=0; ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)8080$" && p8080=1
+pctl=0; ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)$CONTROL_PORT$" && pctl=1
+sshd=$(ps -ef | grep -E "[s]shd.*-p $SSH_PORT|[s]shd$" | wc -l | tr -d " ")
+chisel=$(ps -ef | grep -E "[c]hisel server .*8080" | wc -l | tr -d " ")
+ctl=$(ps -ef | grep -E "[n]ode .*happycapy-control-api.js" | wc -l | tr -d " ")
+printf '{"recover_exists":%s,"recover_script":"%s","p2222":%s,"p8080":%s,"pcontrol":%s,"sshd_proc":%s,"chisel_proc":%s,"control_proc":%s}\n' "$r" "$rs" "$p2222" "$p8080" "$pctl" "$sshd" "$chisel" "$ctl"
+`;
+  const res = runBash(script, 12000, {
+    RECOVER_SCRIPT: cfg.recoverScript,
+    SSH_PORT: String(cfg.sshPort),
+    CONTROL_PORT: String(cfg.controlPort),
+  });
+  const text = (res.out || "").trim();
+  let parsed = {};
+  try {
+    parsed = JSON.parse(text.split(/\n/).filter(Boolean).pop() || "{}");
+  } catch {
+    parsed = {};
+  }
+  return parsed;
+}
+
+function tailFile(path, n) {
+  if (!path) return "";
+  const res = runBash(`tail -n "$N" "$P" 2>/dev/null || true`, 8000, {
+    N: String(Math.max(1, Math.min(500, n))),
+    P: path,
+  });
+  return (res.out || "").trim();
+}
+
+function writeRegistry(chiselServer, controlApiUrl) {
+  if (!cfg.writer) return { ok: false, error: "writer_missing" };
+  const res = runBash(`"$WRITER"`, 30000, {
+    WRITER: cfg.writer,
+    HAPPYCAPY_CHISEL_SERVER: chiselServer || "",
+    HAPPYCAPY_CONTROL_API_URL: controlApiUrl || "",
+  });
+  return { ok: res.ok, code: res.code, output: (res.out || "").trim() };
+}
+
+function doRecover(mode) {
+  const script = `
+R="$RECOVER_SCRIPT"
+if [ ! -x "$R" ]; then
+  R="$(ls -1 /home/node/*/workspace/.happycapy/happycapy-recover.sh 2>/dev/null | head -n1 || true)"
+fi
+if [ -z "$R" ] || [ ! -x "$R" ]; then
+  echo '{"status":"error","message":"no_recover_script"}'
+  exit 2
+fi
+if [ "$MODE" = "hard" ]; then
+  pkill -f "chisel server.*--port 8080" >/dev/null 2>&1 || true
+  pkill -f "sshd.*-p $SSH_PORT" >/dev/null 2>&1 || true
+  sleep 1
+fi
+HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
+`;
+  const res = runBash(script, 180000, {
+    RECOVER_SCRIPT: cfg.recoverScript,
+    MODE: mode || "soft",
+    SSH_PORT: String(cfg.sshPort),
+  });
+  return res;
+}
+
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.end(body);
+}
+
+function collectStatus(refresh) {
+  const state = runtimeState();
+  let chiselServer = "";
+  let controlApiUrl = readText(cfg.controlApiUrlPath);
+  if (refresh) {
+    chiselServer = exportPortUrl(8080);
+    controlApiUrl = exportPortUrl(cfg.controlPort) || controlApiUrl;
+  }
+  if (!chiselServer) {
+    chiselServer = "";
+  }
+  return {
+    ok: true,
+    alias: cfg.alias,
+    control_port: cfg.controlPort,
+    control_api_url: controlApiUrl,
+    chisel_server: chiselServer,
+    registry_url: readText(cfg.registryUrlPath),
+    ...state,
+    checked_at: new Date().toISOString(),
+  };
+}
+
+const server = http.createServer((req, res) => {
+  const u = new URL(req.url || "/", `http://127.0.0.1:${cfg.controlPort}`);
+  if (req.method === "GET" && u.pathname === "/status") {
+    const refresh = u.searchParams.get("refresh") === "1";
+    return sendJson(res, 200, collectStatus(refresh));
+  }
+
+  if (req.method === "GET" && u.pathname === "/logs") {
+    const n = Number(u.searchParams.get("tail") || "120");
+    return sendJson(res, 200, {
+      ok: true,
+      alias: cfg.alias,
+      tail: Math.max(1, Math.min(500, n)),
+      logs: {
+        bootstrap_loop: tailFile("/tmp/hc-bootstrap-loop.log", n),
+        bootstrap: tailFile("/tmp/hc-bootstrap.log", n),
+        recover: tailFile("/tmp/hc-recover-only.log", n),
+        chisel: tailFile("/tmp/happycapy-chisel.log", n),
+        chisel_err: tailFile("/tmp/happycapy-chisel.err.log", n),
+        sshd: tailFile("/tmp/happycapy-sshd.log", n),
+        sshd_err: tailFile("/tmp/happycapy-sshd.err.log", n),
+        registry: tailFile("/tmp/happycapy-registry-report.log", n),
+        registry_err: tailFile("/tmp/happycapy-registry-report.err.log", n),
+      },
+      checked_at: new Date().toISOString(),
+    });
+  }
+
+  if (req.method === "POST" && (u.pathname === "/recover" || u.pathname === "/export-refresh")) {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk.toString("utf8");
+      if (body.length > 1024 * 1024) req.destroy();
+    });
+    req.on("end", () => {
+      let payload = {};
+      try {
+        payload = body ? JSON.parse(body) : {};
+      } catch {
+        payload = {};
+      }
+
+      if (u.pathname === "/recover") {
+        const mode = (payload.mode || u.searchParams.get("mode") || "soft").toString().toLowerCase() === "hard" ? "hard" : "soft";
+        const rec = doRecover(mode);
+        const chiselServer = exportPortUrl(8080);
+        const controlApiUrl = exportPortUrl(cfg.controlPort);
+        const wr = writeRegistry(chiselServer, controlApiUrl);
+        return sendJson(res, rec.ok ? 200 : 500, {
+          ok: rec.ok,
+          action: "recover",
+          mode,
+          rc: rec.code,
+          chisel_server: chiselServer,
+          control_api_url: controlApiUrl,
+          registry_write: wr,
+          output: (rec.out || "").trim().split(/\n/).slice(-20).join("\n"),
+          status: collectStatus(false),
+        });
+      }
+
+      const chiselServer = exportPortUrl(8080);
+      const controlApiUrl = exportPortUrl(cfg.controlPort);
+      const wr = writeRegistry(chiselServer, controlApiUrl);
+      return sendJson(res, wr.ok ? 200 : 500, {
+        ok: wr.ok,
+        action: "export-refresh",
+        chisel_server: chiselServer,
+        control_api_url: controlApiUrl,
+        registry_write: wr,
+        status: collectStatus(false),
+      });
+    });
+    return;
+  }
+
+  sendJson(res, 404, { ok: false, error: "not_found", path: u.pathname });
+});
+
+server.listen(cfg.controlPort, "0.0.0.0", () => {
+  process.stdout.write(`{"status":"ok","control_port":${cfg.controlPort}}\n`);
+});
+EOF2
+  chmod 700 "$CONTROL_API_SCRIPT"
+  echo "$CONTROL_API_SCRIPT"
 }
 
 setup_supervisor() {
@@ -430,6 +712,19 @@ EOF2
     run_root install -m 644 /tmp/happycapy-sshd.conf "${conf_dir}/happycapy-sshd.conf"
   fi
 
+  if [ -n "$CONTROL_API_BIN" ] && [ -x "$CONTROL_API_SCRIPT" ]; then
+    cat > /tmp/happycapy-control-api.conf <<EOF2
+[program:happycapy-control-api]
+command=/usr/bin/env HAPPYCAPY_ALIAS=${ALIAS} HAPPYCAPY_ACCESS_TOKEN=${ACCESS_TOKEN} HAPPYCAPY_SSH_PORT=${SSH_PORT} HAPPYCAPY_CONTROL_PORT=${CONTROL_PORT} HAPPYCAPY_RECOVER_SCRIPT=${RECOVER_SCRIPT_PATH} HAPPYCAPY_REGISTRY_WRITER=${writer} HAPPYCAPY_REGISTRY_URL_PATH=${REGISTRY_URL_PATH} HAPPYCAPY_CONTROL_API_URL_PATH=${CONTROL_API_URL_PATH} HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC=${EXPORT_PORT_TIMEOUT_SEC} ${CONTROL_API_BIN} ${CONTROL_API_SCRIPT}
+autostart=true
+autorestart=true
+startsecs=2
+stdout_logfile=/tmp/happycapy-control-api.log
+stderr_logfile=/tmp/happycapy-control-api.err.log
+EOF2
+    run_root install -m 644 /tmp/happycapy-control-api.conf "${conf_dir}/happycapy-control-api.conf"
+  fi
+
   cat > /tmp/happycapy-registry-report.conf <<EOF2
 [program:happycapy-registry-report]
 command=${writer}
@@ -451,12 +746,66 @@ EOF2
       run_root supervisorctl start happycapy-sshd >/dev/null 2>&1 || run_root supervisorctl restart happycapy-sshd >/dev/null 2>&1 || true
     fi
   fi
+  if [ -n "$CONTROL_API_BIN" ] && [ -x "$CONTROL_API_SCRIPT" ]; then
+    run_root supervisorctl start happycapy-control-api >/dev/null 2>&1 || run_root supervisorctl restart happycapy-control-api >/dev/null 2>&1 || true
+  fi
   run_root supervisorctl start happycapy-registry-report >/dev/null 2>&1 || true
   if run_root supervisorctl status happycapy-chisel >/dev/null 2>&1; then
     SUPERVISOR_MANAGED=1
   else
     SUPERVISOR_MANAGED=0
   fi
+}
+
+start_control_api_fallback() {
+  local old_pid
+  if [ "$SUPERVISOR_MANAGED" -eq 1 ]; then
+    if is_port_listening "$CONTROL_PORT"; then
+      CONTROL_API_OK=1
+    else
+      CONTROL_API_OK=0
+    fi
+    return 0
+  fi
+
+  if [ -z "$CONTROL_API_BIN" ] || [ ! -x "$CONTROL_API_SCRIPT" ]; then
+    CONTROL_API_OK=0
+    return 1
+  fi
+
+  if is_port_listening "$CONTROL_PORT"; then
+    CONTROL_API_OK=1
+    return 0
+  fi
+
+  if [ -f "$CONTROL_API_PID_FILE" ]; then
+    old_pid="$(cat "$CONTROL_API_PID_FILE" 2>/dev/null || true)"
+    if [ -n "${old_pid:-}" ] && kill -0 "$old_pid" 2>/dev/null; then
+      kill "$old_pid" >/dev/null 2>&1 || true
+      sleep 1
+    fi
+  fi
+  pkill -f "happycapy-control-api.js" >/dev/null 2>&1 || true
+  sleep 1
+
+  HAPPYCAPY_ALIAS="$ALIAS" \
+  HAPPYCAPY_ACCESS_TOKEN="$ACCESS_TOKEN" \
+  HAPPYCAPY_SSH_PORT="$SSH_PORT" \
+  HAPPYCAPY_CONTROL_PORT="$CONTROL_PORT" \
+  HAPPYCAPY_RECOVER_SCRIPT="$RECOVER_SCRIPT_PATH" \
+  HAPPYCAPY_REGISTRY_WRITER="$BOOT_WRITER" \
+  HAPPYCAPY_REGISTRY_URL_PATH="$REGISTRY_URL_PATH" \
+  HAPPYCAPY_CONTROL_API_URL_PATH="$CONTROL_API_URL_PATH" \
+  HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC="$EXPORT_PORT_TIMEOUT_SEC" \
+  nohup "$CONTROL_API_BIN" "$CONTROL_API_SCRIPT" >/tmp/happycapy-control-api.log 2>/tmp/happycapy-control-api.err.log &
+  printf '%s\n' "$!" > "$CONTROL_API_PID_FILE"
+  sleep 1
+  if is_port_listening "$CONTROL_PORT"; then
+    CONTROL_API_OK=1
+    return 0
+  fi
+  CONTROL_API_OK=0
+  return 1
 }
 
 start_fallback_processes() {
@@ -493,25 +842,29 @@ start_fallback_processes() {
       nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
       ;;
   esac
+
+  start_control_api_fallback || true
 }
 
-query_preview_url_once() {
+query_preview_url_for_port_once() {
+  local port="$1"
   local resp preview
   resp="$(curl -sS -m "$EXPORT_PORT_TIMEOUT_SEC" -X POST "https://happycapy.ai/api/export-port" \
     -H "Authorization: Bearer ${ACCESS_TOKEN}" \
     -H "Cookie: authToken=${ACCESS_TOKEN}" \
     -H "Content-Type: application/json" \
-    --data '{"port":8080}' || true)"
+    --data "{\"port\":${port}}" || true)"
   preview="$(printf '%s' "$resp" | sed -n 's/.*"previewUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
   if [ -n "$preview" ]; then
     printf 'https://%s' "${preview#https://}"
   fi
 }
 
-query_preview_url() {
+query_preview_url_for_port() {
+  local port="$1"
   local url
   for _ in 1 2; do
-    url="$(query_preview_url_once || true)"
+    url="$(query_preview_url_for_port_once "$port" || true)"
     if [ -n "$url" ]; then
       printf '%s\n' "$url"
       return 0
@@ -519,6 +872,10 @@ query_preview_url() {
     sleep 1
   done
   return 1
+}
+
+query_preview_url() {
+  query_preview_url_for_port 8080
 }
 
 install_recover_script() {
@@ -551,6 +908,8 @@ export HAPPYCAPY_REGISTRY_FILE="\${HAPPYCAPY_REGISTRY_FILE:-${REGISTRY_FILE}}"
 export HAPPYCAPY_REGISTRY_UPLOAD_API="\${HAPPYCAPY_REGISTRY_UPLOAD_API:-${UPLOAD_API}}"
 export HAPPYCAPY_REGISTRY_BASE="\${HAPPYCAPY_REGISTRY_BASE:-${REGISTRY_BASE}}"
 export HAPPYCAPY_REGISTRY_URL_PATH="\${HAPPYCAPY_REGISTRY_URL_PATH:-${REGISTRY_URL_PATH}}"
+export HAPPYCAPY_CONTROL_PORT="\${HAPPYCAPY_CONTROL_PORT:-${CONTROL_PORT}}"
+export HAPPYCAPY_CONTROL_API_URL_PATH="\${HAPPYCAPY_CONTROL_API_URL_PATH:-${CONTROL_API_URL_PATH}}"
 export HAPPYCAPY_RECOVER_SCRIPT="\${HAPPYCAPY_RECOVER_SCRIPT:-${RECOVER_SCRIPT_PATH}}"
 export HAPPYCAPY_RECOVER_CHAIN=1
 
@@ -583,6 +942,12 @@ verify_services() {
     fi
   fi
 
+  if is_port_listening "$CONTROL_PORT"; then
+    CONTROL_API_OK=1
+  else
+    CONTROL_API_OK=0
+  fi
+
   if [ "$CHISEL_OK" -ne 1 ] || [ "$SSHD_OK" -ne 1 ]; then
     return 1
   fi
@@ -595,10 +960,11 @@ watchdog_loop() {
     setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER"
     start_fallback_processes "$CHISEL_BIN"
     if verify_services; then
-      local server_now
-      server_now="$(query_preview_url || true)"
+      local server_now control_now
+      server_now="$(query_preview_url_for_port 8080 || true)"
+      control_now="$(query_preview_url_for_port "$CONTROL_PORT" || true)"
       if [ -n "$server_now" ]; then
-        HAPPYCAPY_CHISEL_SERVER="$server_now" "$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1 || true
+        HAPPYCAPY_CHISEL_SERVER="$server_now" HAPPYCAPY_CONTROL_API_URL="$control_now" "$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1 || true
       fi
     fi
     sleep "$interval"
@@ -643,6 +1009,8 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
+CONTROL_API_BIN="$(command -v node || true)"
+
 CHISEL_BIN="$(install_chisel || true)"
 if [ -z "$CHISEL_BIN" ]; then
   emit_error "failed to install/find chisel"
@@ -658,6 +1026,10 @@ BOOT_WRITER="$(write_reporter || true)"
 if [ -z "$BOOT_WRITER" ] || [ ! -x "$BOOT_WRITER" ]; then
   emit_error "failed to create registry writer"
   exit 1
+fi
+
+if [ -n "$CONTROL_API_BIN" ]; then
+  write_control_api_server >/dev/null 2>&1 || true
 fi
 
 HEAL_MAX_ROUNDS_RAW="${HAPPYCAPY_HEAL_MAX_ROUNDS:-8}"
@@ -679,6 +1051,7 @@ case "$HEAL_SLEEP_SEC_RAW" in
 esac
 
 CHISEL_SERVER=""
+CONTROL_API_URL=""
 REGISTRY_URL=""
 HEAL_OK=0
 HEAL_LAST_ERR=""
@@ -696,7 +1069,7 @@ while [ "$HEAL_ROUND" -le "$HEAL_MAX_ROUNDS" ]; do
     continue
   fi
 
-  CHISEL_SERVER="$(query_preview_url || true)"
+  CHISEL_SERVER="$(query_preview_url_for_port 8080 || true)"
   if [ -z "$CHISEL_SERVER" ]; then
     HEAL_LAST_STEP="query_preview_url"
     HEAL_LAST_ERR="preview_url_empty"
@@ -704,8 +1077,9 @@ while [ "$HEAL_ROUND" -le "$HEAL_MAX_ROUNDS" ]; do
     HEAL_ROUND=$((HEAL_ROUND + 1))
     continue
   fi
+  CONTROL_API_URL="$(query_preview_url_for_port "$CONTROL_PORT" || true)"
 
-  if ! HAPPYCAPY_CHISEL_SERVER="$CHISEL_SERVER" "$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1; then
+  if ! HAPPYCAPY_CHISEL_SERVER="$CHISEL_SERVER" HAPPYCAPY_CONTROL_API_URL="$CONTROL_API_URL" "$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1; then
     HEAL_LAST_STEP="write_registry"
     HEAL_LAST_ERR="registry_write_failed"
     sleep "$HEAL_SLEEP_SEC"
@@ -716,6 +1090,9 @@ while [ "$HEAL_ROUND" -le "$HEAL_MAX_ROUNDS" ]; do
   REGISTRY_URL=""
   if [ -f "$REGISTRY_URL_PATH" ]; then
     REGISTRY_URL="$(head -n1 "$REGISTRY_URL_PATH" | tr -d '\r')"
+  fi
+  if [ -z "$CONTROL_API_URL" ] && [ -f "$CONTROL_API_URL_PATH" ]; then
+    CONTROL_API_URL="$(head -n1 "$CONTROL_API_URL_PATH" | tr -d '\r')"
   fi
   if [ -z "$REGISTRY_URL" ]; then
     HEAL_LAST_STEP="read_registry_url"
@@ -740,9 +1117,11 @@ if [ "$OUTPUT_MODE" = "short" ]; then
     "$(json_escape "${RECOVER_SCRIPT_PATH}")" \
     "$HEAL_ROUND"
 else
-  printf '{"status":"ok","alias":"%s","chisel_server":"%s","chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s,"heal_round":%s}\n' \
+  printf '{"status":"ok","alias":"%s","chisel_server":"%s","control_api_url":"%s","control_port":%s,"chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s,"control_api_ok":%s,"heal_round":%s}\n' \
     "$(json_escape "$ALIAS")" \
     "$(json_escape "${CHISEL_SERVER}")" \
+    "$(json_escape "${CONTROL_API_URL}")" \
+    "$CONTROL_PORT" \
     "$(json_escape "$CHISEL_AUTH")" \
     "$(json_escape "$SSH_USER")" \
     "$(json_escape "$SSH_PASSWORD")" \
@@ -755,6 +1134,7 @@ else
     "$SUPERVISOR_MANAGED" \
     "$CHISEL_OK" \
     "$SSHD_OK" \
+    "$CONTROL_API_OK" \
     "$HEAL_ROUND"
 fi
 
