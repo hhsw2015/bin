@@ -48,6 +48,20 @@ if [ -z "$OUTPUT_MODE" ]; then
     OUTPUT_MODE="full"
   fi
 fi
+WATCHDOG_MODE_RAW="$(printf '%s' "${HAPPYCAPY_WATCHDOG_MODE:-0}" | tr '[:upper:]' '[:lower:]')"
+WATCHDOG_MODE=0
+case "$WATCHDOG_MODE_RAW" in
+  1|true|yes|on) WATCHDOG_MODE=1 ;;
+esac
+WATCHDOG_INTERVAL_RAW="${HAPPYCAPY_WATCHDOG_INTERVAL_SEC:-8}"
+case "$WATCHDOG_INTERVAL_RAW" in
+  ''|*[!0-9.]*)
+    WATCHDOG_INTERVAL_SEC=8
+    ;;
+  *)
+    WATCHDOG_INTERVAL_SEC="$WATCHDOG_INTERVAL_RAW"
+    ;;
+esac
 
 SUPERVISOR_MANAGED=0
 CHISEL_OK=0
@@ -306,17 +320,19 @@ UPLOAD_API="${UPLOAD_API}"
 REGISTRY_BASE="${REGISTRY_BASE}"
 REGISTRY_URL_PATH="${REGISTRY_URL_PATH}"
 
-resp="\$(curl -sS -m 20 -X POST "https://happycapy.ai/api/export-port" \\
-  -H "Authorization: Bearer \$ACCESS_TOKEN" \\
-  -H "Cookie: authToken=\$ACCESS_TOKEN" \\
-  -H "Content-Type: application/json" \\
-  --data '{"port":8080}' || true)"
-preview="\$(printf '%s' "\$resp" | sed -n 's/.*"previewUrl"[[:space:]]*:[[:space:]]*"\\([^\"]*\\)".*/\\1/p' | head -n1)"
-if [ -z "\$preview" ]; then
-  exit 0
+server="\${HAPPYCAPY_CHISEL_SERVER:-}"
+if [ -z "\$server" ]; then
+  resp="\$(curl -sS -m 20 -X POST "https://happycapy.ai/api/export-port" \\
+    -H "Authorization: Bearer \$ACCESS_TOKEN" \\
+    -H "Cookie: authToken=\$ACCESS_TOKEN" \\
+    -H "Content-Type: application/json" \\
+    --data '{"port":8080}' || true)"
+  preview="\$(printf '%s' "\$resp" | sed -n 's/.*"previewUrl"[[:space:]]*:[[:space:]]*"\\([^\"]*\\)".*/\\1/p' | head -n1)"
+  if [ -z "\$preview" ]; then
+    exit 1
+  fi
+  server="https://\${preview#https://}"
 fi
-
-server="https://\${preview#https://}"
 now="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 tmpf="/tmp/\${REGISTRY_FILE}"
 cat > "\$tmpf" <<JSON
@@ -336,7 +352,7 @@ while [ "\$attempt" -le 3 ]; do
   sleep 2
 done
 
-exit 0
+exit 1
 EOF2
 
   mkdir -p "$PERSIST_DIR"
@@ -419,13 +435,11 @@ EOF2
 
 start_fallback_processes() {
   local chisel_bin="$1"
-  local writer="$2"
   local sshd_bin
 
   sshd_bin="$(find_sshd_bin || true)"
 
   if [ "$SUPERVISOR_MANAGED" -eq 1 ]; then
-    "$writer" >/tmp/happycapy-registry-report.log 2>&1 || true
     return 0
   fi
 
@@ -453,8 +467,6 @@ start_fallback_processes() {
       nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
       ;;
   esac
-
-  "$writer" >/tmp/happycapy-registry-report.log 2>&1 || true
 }
 
 query_preview_url_once() {
@@ -551,6 +563,22 @@ verify_services() {
   return 0
 }
 
+watchdog_loop() {
+  local interval="$1"
+  while true; do
+    setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER"
+    start_fallback_processes "$CHISEL_BIN"
+    if verify_services; then
+      local server_now
+      server_now="$(query_preview_url || true)"
+      if [ -n "$server_now" ]; then
+        HAPPYCAPY_CHISEL_SERVER="$server_now" "$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1 || true
+      fi
+    fi
+    sleep "$interval"
+  done
+}
+
 if [ -z "$ACCESS_TOKEN" ]; then
   emit_error "HAPPYCAPY_ACCESS_TOKEN is empty"
   exit 1
@@ -606,28 +634,87 @@ if [ -z "$BOOT_WRITER" ] || [ ! -x "$BOOT_WRITER" ]; then
   exit 1
 fi
 
-setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER"
-start_fallback_processes "$CHISEL_BIN" "$BOOT_WRITER"
+HEAL_MAX_ROUNDS_RAW="${HAPPYCAPY_HEAL_MAX_ROUNDS:-20}"
+case "$HEAL_MAX_ROUNDS_RAW" in
+  ''|*[!0-9]*) HEAL_MAX_ROUNDS=20 ;;
+  *) HEAL_MAX_ROUNDS="$HEAL_MAX_ROUNDS_RAW" ;;
+esac
+if [ "$HEAL_MAX_ROUNDS" -lt 1 ]; then
+  HEAL_MAX_ROUNDS=1
+fi
+HEAL_SLEEP_SEC_RAW="${HAPPYCAPY_HEAL_SLEEP_SEC:-3}"
+case "$HEAL_SLEEP_SEC_RAW" in
+  ''|*[!0-9.]*)
+    HEAL_SLEEP_SEC=3
+    ;;
+  *)
+    HEAL_SLEEP_SEC="$HEAL_SLEEP_SEC_RAW"
+    ;;
+esac
 
-if ! verify_services; then
-  emit_error "services not healthy (chisel_ok=${CHISEL_OK}, sshd_ok=${SSHD_OK})"
+CHISEL_SERVER=""
+REGISTRY_URL=""
+HEAL_OK=0
+HEAL_LAST_ERR=""
+HEAL_LAST_STEP=""
+HEAL_ROUND=1
+while [ "$HEAL_ROUND" -le "$HEAL_MAX_ROUNDS" ]; do
+  setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER"
+  start_fallback_processes "$CHISEL_BIN"
+
+  if ! verify_services; then
+    HEAL_LAST_STEP="verify_services"
+    HEAL_LAST_ERR="services not healthy (chisel_ok=${CHISEL_OK}, sshd_ok=${SSHD_OK})"
+    sleep "$HEAL_SLEEP_SEC"
+    HEAL_ROUND=$((HEAL_ROUND + 1))
+    continue
+  fi
+
+  CHISEL_SERVER="$(query_preview_url || true)"
+  if [ -z "$CHISEL_SERVER" ]; then
+    HEAL_LAST_STEP="query_preview_url"
+    HEAL_LAST_ERR="preview_url_empty"
+    sleep "$HEAL_SLEEP_SEC"
+    HEAL_ROUND=$((HEAL_ROUND + 1))
+    continue
+  fi
+
+  if ! HAPPYCAPY_CHISEL_SERVER="$CHISEL_SERVER" "$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1; then
+    HEAL_LAST_STEP="write_registry"
+    HEAL_LAST_ERR="registry_write_failed"
+    sleep "$HEAL_SLEEP_SEC"
+    HEAL_ROUND=$((HEAL_ROUND + 1))
+    continue
+  fi
+
+  REGISTRY_URL=""
+  if [ -f "$REGISTRY_URL_PATH" ]; then
+    REGISTRY_URL="$(head -n1 "$REGISTRY_URL_PATH" | tr -d '\r')"
+  fi
+  if [ -z "$REGISTRY_URL" ]; then
+    HEAL_LAST_STEP="read_registry_url"
+    HEAL_LAST_ERR="registry_url_missing"
+    sleep "$HEAL_SLEEP_SEC"
+    HEAL_ROUND=$((HEAL_ROUND + 1))
+    continue
+  fi
+
+  HEAL_OK=1
+  break
+done
+
+if [ "$HEAL_OK" -ne 1 ]; then
+  emit_error "heal_loop_exhausted step=${HEAL_LAST_STEP} detail=${HEAL_LAST_ERR}"
   exit 1
 fi
 
-CHISEL_SERVER="$(query_preview_url || true)"
-"$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1 || true
-
-REGISTRY_URL=""
-if [ -f "$REGISTRY_URL_PATH" ]; then
-  REGISTRY_URL="$(head -n1 "$REGISTRY_URL_PATH" | tr -d '\r')"
-fi
-
 if [ "$OUTPUT_MODE" = "short" ]; then
-  printf '{"status":"ok","chisel_server":"%s","recover_script":"%s"}\n' \
+  printf '{"status":"ok","chisel_server":"%s","recover_script":"%s","round":%s}\n' \
     "$(json_escape "${CHISEL_SERVER}")" \
-    "$(json_escape "${RECOVER_SCRIPT_PATH}")"
+    "$(json_escape "${RECOVER_SCRIPT_PATH}")" \
+    "$HEAL_ROUND"
 else
-  printf '{"status":"ok","alias":"%s","chisel_server":"%s","chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s}\n' \
+  printf '{"status":"ok","alias":"%s","chisel_server":"%s","chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s,"heal_round":%s}\n' \
     "$(json_escape "$ALIAS")" \
     "$(json_escape "${CHISEL_SERVER}")" \
     "$(json_escape "$CHISEL_AUTH")" \
@@ -641,5 +728,10 @@ else
     "$(json_escape "${PERSIST_BOOTSTRAP}")" \
     "$SUPERVISOR_MANAGED" \
     "$CHISEL_OK" \
-    "$SSHD_OK"
+    "$SSHD_OK" \
+    "$HEAL_ROUND"
+fi
+
+if [ "$WATCHDOG_MODE" -eq 1 ] && [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ]; then
+  watchdog_loop "$WATCHDOG_INTERVAL_SEC"
 fi
