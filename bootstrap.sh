@@ -580,15 +580,16 @@ function collectStatus(refresh) {
   const p8080 = Number(state.p8080 || 0) > 0;
   const sshdProc = Number(state.sshd_proc || 0) > 0;
   const chiselProc = Number(state.chisel_proc || 0) > 0;
-  let runtimeState = "down";
+  let runtimeStateValue = "down";
   if (recoverInProgress) {
-    runtimeState = "recovering";
+    runtimeStateValue = "recovering";
   } else if (p2222 && p8080 && sshdProc && chiselProc) {
-    runtimeState = "ready";
+    runtimeStateValue = "ready";
   } else if (p2222 || p8080 || sshdProc || chiselProc) {
-    runtimeState = "starting";
+    runtimeStateValue = "starting";
   }
-  const recommendedAction = runtimeState === "ready" ? "connect" : (runtimeState === "down" ? "recover" : "wait");
+  const recommendedAction =
+    runtimeStateValue === "ready" ? "connect" : (runtimeStateValue === "down" ? "recover" : "wait");
   return {
     ok: true,
     alias: cfg.alias,
@@ -596,7 +597,7 @@ function collectStatus(refresh) {
     control_api_url: controlApiUrl,
     chisel_server: chiselServer,
     registry_url: readText(cfg.registryUrlPath),
-    runtime_state: runtimeState,
+    runtime_state: runtimeStateValue,
     recommended_action: recommendedAction,
     recover_in_progress: recoverInProgress,
     last_recover_at: lastRecoverAt ? new Date(lastRecoverAt).toISOString() : "",
