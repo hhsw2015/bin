@@ -468,7 +468,7 @@ resp="$(curl -sS -m "$EXPORT_TIMEOUT" -X POST "https://happycapy.ai/api/export-p
   --data "{\\"port\\":$PORT}" || true)"
 preview="$(printf '%s' "$resp" | sed -n 's/.*"previewUrl"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -n1)"
 if [ -n "$preview" ]; then
-  printf 'https://%s' "${preview#https://}"
+  printf 'https://%s' "\${preview#https://}"
 fi
 `;
   const res = runBash(script, 20000, {
