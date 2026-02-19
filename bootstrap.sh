@@ -809,7 +809,7 @@ start_control_api_fallback() {
       if is_port_listening "$CONTROL_PORT"; then
         CONTROL_API_OK=1
       else
-      CONTROL_API_OK=0
+        CONTROL_API_OK=0
       fi
     fi
     return 0
