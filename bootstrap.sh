@@ -433,6 +433,9 @@ const cfg = {
   controlApiUrlPath: process.env.HAPPYCAPY_CONTROL_API_URL_PATH || "",
   exportTimeout: Number(process.env.HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC || "8"),
 };
+let recoverInProgress = false;
+let lastRecoverAt = 0;
+let lastRecoverOk = null;
 
 function runBash(script, timeoutMs = 15000, envExtra = {}) {
   const ret = spawnSync("bash", ["-lc", script], {
@@ -572,6 +575,19 @@ function collectStatus(refresh) {
   if (!chiselServer) {
     chiselServer = "";
   }
+  const p2222 = Number(state.p2222 || 0) > 0;
+  const p8080 = Number(state.p8080 || 0) > 0;
+  const sshdProc = Number(state.sshd_proc || 0) > 0;
+  const chiselProc = Number(state.chisel_proc || 0) > 0;
+  let runtimeState = "down";
+  if (recoverInProgress) {
+    runtimeState = "recovering";
+  } else if (p2222 && p8080 && sshdProc && chiselProc) {
+    runtimeState = "ready";
+  } else if (p2222 || p8080 || sshdProc || chiselProc) {
+    runtimeState = "starting";
+  }
+  const recommendedAction = runtimeState === "ready" ? "connect" : (runtimeState === "down" ? "recover" : "wait");
   return {
     ok: true,
     alias: cfg.alias,
@@ -579,6 +595,11 @@ function collectStatus(refresh) {
     control_api_url: controlApiUrl,
     chisel_server: chiselServer,
     registry_url: readText(cfg.registryUrlPath),
+    runtime_state: runtimeState,
+    recommended_action: recommendedAction,
+    recover_in_progress: recoverInProgress,
+    last_recover_at: lastRecoverAt ? new Date(lastRecoverAt).toISOString() : "",
+    last_recover_ok: lastRecoverOk,
     ...state,
     checked_at: new Date().toISOString(),
   };
@@ -627,8 +648,25 @@ const server = http.createServer((req, res) => {
       }
 
       if (u.pathname === "/recover") {
+        if (recoverInProgress) {
+          return sendJson(res, 200, {
+            ok: true,
+            action: "recover",
+            already_running: true,
+            status: collectStatus(false),
+          });
+        }
         const mode = (payload.mode || u.searchParams.get("mode") || "soft").toString().toLowerCase() === "hard" ? "hard" : "soft";
-        const rec = doRecover(mode);
+        recoverInProgress = true;
+        lastRecoverAt = Date.now();
+        let rec = { ok: false, code: -1, out: "recover_not_started" };
+        try {
+          rec = doRecover(mode);
+        } catch (e) {
+          rec = { ok: false, code: -1, out: String(e || "recover_exception") };
+        }
+        recoverInProgress = false;
+        lastRecoverOk = !!rec.ok;
         const chiselServer = exportPortUrl(8080);
         const controlApiUrl = exportPortUrl(cfg.controlPort);
         const wr = writeRegistry(chiselServer, controlApiUrl);
