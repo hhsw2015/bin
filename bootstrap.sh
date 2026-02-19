@@ -729,7 +729,7 @@ setup_supervisor() {
 
   cat > /tmp/happycapy-chisel.conf <<EOF2
 [program:happycapy-chisel]
-command=${chisel_bin} server --port 8080 --auth ${CHISEL_AUTH} --keepalive 30s
+command=${chisel_bin} server --host 0.0.0.0 --port 8080 --auth ${CHISEL_AUTH} --keepalive 30s
 autostart=true
 autorestart=true
 startsecs=2
@@ -878,16 +878,16 @@ start_fallback_processes() {
       if ! is_port_listening 8080; then
         pkill -f "chisel server.*--port 8080" >/dev/null 2>&1 || true
         sleep 1
-        nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
+        nohup "$chisel_bin" server --host 0.0.0.0 --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
       fi
       ;;
     other)
       pkill -f "chisel server.*--port 8080" >/dev/null 2>&1 || true
       sleep 1
-      nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
+      nohup "$chisel_bin" server --host 0.0.0.0 --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
       ;;
     none)
-      nohup "$chisel_bin" server --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
+      nohup "$chisel_bin" server --host 0.0.0.0 --port 8080 --auth "$CHISEL_AUTH" --keepalive 30s >/tmp/happycapy-chisel.log 2>&1 &
       ;;
   esac
 
