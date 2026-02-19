@@ -62,6 +62,30 @@ case "$WATCHDOG_INTERVAL_RAW" in
     WATCHDOG_INTERVAL_SEC="$WATCHDOG_INTERVAL_RAW"
     ;;
 esac
+EXPORT_PORT_TIMEOUT_RAW="${HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC:-8}"
+case "$EXPORT_PORT_TIMEOUT_RAW" in
+  ''|*[!0-9.]*)
+    EXPORT_PORT_TIMEOUT_SEC=8
+    ;;
+  *)
+    EXPORT_PORT_TIMEOUT_SEC="$EXPORT_PORT_TIMEOUT_RAW"
+    ;;
+esac
+if [ "${EXPORT_PORT_TIMEOUT_SEC%.*}" -lt 4 ] 2>/dev/null; then
+  EXPORT_PORT_TIMEOUT_SEC=4
+fi
+UPLOAD_TIMEOUT_RAW="${HAPPYCAPY_UPLOAD_TIMEOUT_SEC:-8}"
+case "$UPLOAD_TIMEOUT_RAW" in
+  ''|*[!0-9.]*)
+    UPLOAD_TIMEOUT_SEC=8
+    ;;
+  *)
+    UPLOAD_TIMEOUT_SEC="$UPLOAD_TIMEOUT_RAW"
+    ;;
+esac
+if [ "${UPLOAD_TIMEOUT_SEC%.*}" -lt 4 ] 2>/dev/null; then
+  UPLOAD_TIMEOUT_SEC=4
+fi
 
 SUPERVISOR_MANAGED=0
 CHISEL_OK=0
@@ -319,10 +343,12 @@ REGISTRY_FILE="${REGISTRY_FILE}"
 UPLOAD_API="${UPLOAD_API}"
 REGISTRY_BASE="${REGISTRY_BASE}"
 REGISTRY_URL_PATH="${REGISTRY_URL_PATH}"
+EXPORT_PORT_TIMEOUT_SEC="${EXPORT_PORT_TIMEOUT_SEC}"
+UPLOAD_TIMEOUT_SEC="${UPLOAD_TIMEOUT_SEC}"
 
 server="\${HAPPYCAPY_CHISEL_SERVER:-}"
 if [ -z "\$server" ]; then
-  resp="\$(curl -sS -m 20 -X POST "https://happycapy.ai/api/export-port" \\
+  resp="\$(curl -sS -m "\$EXPORT_PORT_TIMEOUT_SEC" -X POST "https://happycapy.ai/api/export-port" \\
     -H "Authorization: Bearer \$ACCESS_TOKEN" \\
     -H "Cookie: authToken=\$ACCESS_TOKEN" \\
     -H "Content-Type: application/json" \\
@@ -340,8 +366,8 @@ cat > "\$tmpf" <<JSON
 JSON
 
 attempt=1
-while [ "\$attempt" -le 3 ]; do
-  up="\$(curl -sS -m 20 -F "file=@\${tmpf};filename=\${REGISTRY_FILE};type=text/plain" "\$UPLOAD_API" || true)"
+while [ "\$attempt" -le 2 ]; do
+  up="\$(curl -sS -m "\$UPLOAD_TIMEOUT_SEC" -F "file=@\${tmpf};filename=\${REGISTRY_FILE};type=text/plain" "\$UPLOAD_API" || true)"
   rel="\$(printf '%s' "\$up" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\\([^\"]*\\)".*/\\1/p' | head -n1)"
   if [ -n "\$rel" ]; then
     mkdir -p "\$(dirname "\$REGISTRY_URL_PATH")" 2>/dev/null || true
@@ -349,7 +375,7 @@ while [ "\$attempt" -le 3 ]; do
     exit 0
   fi
   attempt=\$((attempt + 1))
-  sleep 2
+  sleep 1
 done
 
 exit 1
@@ -471,7 +497,7 @@ start_fallback_processes() {
 
 query_preview_url_once() {
   local resp preview
-  resp="$(curl -sS -m 20 -X POST "https://happycapy.ai/api/export-port" \
+  resp="$(curl -sS -m "$EXPORT_PORT_TIMEOUT_SEC" -X POST "https://happycapy.ai/api/export-port" \
     -H "Authorization: Bearer ${ACCESS_TOKEN}" \
     -H "Cookie: authToken=${ACCESS_TOKEN}" \
     -H "Content-Type: application/json" \
@@ -484,13 +510,13 @@ query_preview_url_once() {
 
 query_preview_url() {
   local url
-  for _ in 1 2 3; do
+  for _ in 1 2; do
     url="$(query_preview_url_once || true)"
     if [ -n "$url" ]; then
       printf '%s\n' "$url"
       return 0
     fi
-    sleep 2
+    sleep 1
   done
   return 1
 }
@@ -634,18 +660,18 @@ if [ -z "$BOOT_WRITER" ] || [ ! -x "$BOOT_WRITER" ]; then
   exit 1
 fi
 
-HEAL_MAX_ROUNDS_RAW="${HAPPYCAPY_HEAL_MAX_ROUNDS:-20}"
+HEAL_MAX_ROUNDS_RAW="${HAPPYCAPY_HEAL_MAX_ROUNDS:-8}"
 case "$HEAL_MAX_ROUNDS_RAW" in
-  ''|*[!0-9]*) HEAL_MAX_ROUNDS=20 ;;
+  ''|*[!0-9]*) HEAL_MAX_ROUNDS=8 ;;
   *) HEAL_MAX_ROUNDS="$HEAL_MAX_ROUNDS_RAW" ;;
 esac
 if [ "$HEAL_MAX_ROUNDS" -lt 1 ]; then
   HEAL_MAX_ROUNDS=1
 fi
-HEAL_SLEEP_SEC_RAW="${HAPPYCAPY_HEAL_SLEEP_SEC:-3}"
+HEAL_SLEEP_SEC_RAW="${HAPPYCAPY_HEAL_SLEEP_SEC:-1.5}"
 case "$HEAL_SLEEP_SEC_RAW" in
   ''|*[!0-9.]*)
-    HEAL_SLEEP_SEC=3
+    HEAL_SLEEP_SEC=1.5
     ;;
   *)
     HEAL_SLEEP_SEC="$HEAL_SLEEP_SEC_RAW"
