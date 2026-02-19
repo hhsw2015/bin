@@ -24,13 +24,22 @@ REGISTRY_FILE="${HAPPYCAPY_REGISTRY_FILE:-happycapy_${ALIAS}.txt}"
 UPLOAD_API="${HAPPYCAPY_REGISTRY_UPLOAD_API:-https://file.zmkk.fun/api/upload}"
 REGISTRY_BASE="${HAPPYCAPY_REGISTRY_BASE:-https://file.zmkk.fun}"
 PERSIST_ROOT="${HAPPYCAPY_PERSIST_ROOT:-}"
-if [ -z "$PERSIST_ROOT" ]; then
-  for d in /home/node/*/workspace /home/node/workspace; do
-    if [ -d "$d" ]; then
-      PERSIST_ROOT="$d"
-      break
-    fi
-  done
+# Normalize transient workspace-style roots to a stable persisted root.
+# Example: /home/node/a0/workspace/<session>/workspace -> /home/node/a0/workspace
+if [ -n "$PERSIST_ROOT" ]; then
+  PERSIST_ROOT="$(printf '%s' "$PERSIST_ROOT" | sed -E 's#^(/home/node/[^/]+/workspace)/.+/workspace/?$#\1#')"
+fi
+if [ -z "$PERSIST_ROOT" ] || [ ! -d "$PERSIST_ROOT" ]; then
+  if [ -d /home/node/a0/workspace ]; then
+    PERSIST_ROOT="/home/node/a0/workspace"
+  else
+    for d in /home/node/*/workspace /home/node/workspace; do
+      if [ -d "$d" ]; then
+        PERSIST_ROOT="$d"
+        break
+      fi
+    done
+  fi
   if [ -z "$PERSIST_ROOT" ]; then
     PERSIST_ROOT="$HOME"
   fi
@@ -44,6 +53,8 @@ CONTROL_PORT="${HAPPYCAPY_CONTROL_PORT:-18080}"
 CONTROL_API_SCRIPT="${PERSIST_DIR}/happycapy-control-api.js"
 CONTROL_API_PID_FILE="${PERSIST_DIR}/happycapy-control-api.pid"
 CONTROL_API_URL_PATH="${HAPPYCAPY_CONTROL_API_URL_PATH:-${PERSIST_DIR}/control_api_url.txt}"
+BOOTSTRAP_LOCK_DIR="${PERSIST_DIR}/bootstrap.lock"
+BOOTSTRAP_LOCK_PID_FILE="${BOOTSTRAP_LOCK_DIR}/pid"
 OUTPUT_MODE="${HAPPYCAPY_OUTPUT_MODE:-}"
 if [ -z "$OUTPUT_MODE" ]; then
   if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" = "1" ]; then
@@ -128,6 +139,15 @@ run_root() {
 is_port_listening() {
   local port="$1"
   ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${port}$"
+}
+
+control_api_http_ready() {
+  local body
+  body="$(curl -sS -m 5 "http://127.0.0.1:${CONTROL_PORT}/status" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    return 1
+  fi
+  printf '%s' "$body" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'
 }
 
 find_sshd_bin() {
@@ -711,6 +731,25 @@ EOF2
   echo "$CONTROL_API_SCRIPT"
 }
 
+ensure_control_api_script() {
+  if [ -z "$CONTROL_API_BIN" ]; then
+    return 1
+  fi
+  if [ ! -x "$CONTROL_API_SCRIPT" ]; then
+    write_control_api_server >/dev/null 2>&1 || true
+  fi
+  if [ ! -x "$CONTROL_API_SCRIPT" ]; then
+    return 1
+  fi
+  if ! "$CONTROL_API_BIN" --check "$CONTROL_API_SCRIPT" >/tmp/happycapy-control-api.check.log 2>&1; then
+    write_control_api_server >/dev/null 2>&1 || true
+    if ! "$CONTROL_API_BIN" --check "$CONTROL_API_SCRIPT" >/tmp/happycapy-control-api.check.log 2>&1; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
 setup_supervisor() {
   local chisel_bin="$1"
   local writer="$2"
@@ -800,14 +839,15 @@ EOF2
 start_control_api_fallback() {
   local old_pid
   if [ "$SUPERVISOR_MANAGED" -eq 1 ]; then
-    if is_port_listening "$CONTROL_PORT"; then
+    if is_port_listening "$CONTROL_PORT" && control_api_http_ready; then
       CONTROL_API_OK=1
     else
       if [ "$CONTROL_API_REQUIRED" -eq 1 ]; then
+        ensure_control_api_script >/dev/null 2>&1 || true
         run_root supervisorctl start happycapy-control-api >/dev/null 2>&1 || run_root supervisorctl restart happycapy-control-api >/dev/null 2>&1 || true
         sleep 1
       fi
-      if is_port_listening "$CONTROL_PORT"; then
+      if is_port_listening "$CONTROL_PORT" && control_api_http_ready; then
         CONTROL_API_OK=1
       else
         CONTROL_API_OK=0
@@ -821,10 +861,12 @@ start_control_api_fallback() {
     return 1
   fi
 
-  if is_port_listening "$CONTROL_PORT"; then
+  if is_port_listening "$CONTROL_PORT" && control_api_http_ready; then
     CONTROL_API_OK=1
     return 0
   fi
+
+  ensure_control_api_script >/dev/null 2>&1 || true
 
   if [ -f "$CONTROL_API_PID_FILE" ]; then
     old_pid="$(cat "$CONTROL_API_PID_FILE" 2>/dev/null || true)"
@@ -847,11 +889,13 @@ start_control_api_fallback() {
   HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC="$EXPORT_PORT_TIMEOUT_SEC" \
   nohup "$CONTROL_API_BIN" "$CONTROL_API_SCRIPT" >/tmp/happycapy-control-api.log 2>/tmp/happycapy-control-api.err.log &
   printf '%s\n' "$!" > "$CONTROL_API_PID_FILE"
-  sleep 1
-  if is_port_listening "$CONTROL_PORT"; then
-    CONTROL_API_OK=1
-    return 0
-  fi
+  for _ in 1 2 3; do
+    sleep 1
+    if is_port_listening "$CONTROL_PORT" && control_api_http_ready; then
+      CONTROL_API_OK=1
+      return 0
+    fi
+  done
   CONTROL_API_OK=0
   return 1
 }
@@ -992,7 +1036,7 @@ verify_services() {
   fi
 
   if [ "$CONTROL_API_REQUIRED" -eq 1 ]; then
-    if is_port_listening "$CONTROL_PORT"; then
+    if is_port_listening "$CONTROL_PORT" && control_api_http_ready; then
       CONTROL_API_OK=1
     else
       CONTROL_API_OK=0
@@ -1027,6 +1071,39 @@ watchdog_loop() {
   done
 }
 
+acquire_bootstrap_lock() {
+  mkdir -p "$PERSIST_DIR"
+  local tries=0
+  local max_tries=12
+  while true; do
+    if mkdir "$BOOTSTRAP_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$BOOTSTRAP_LOCK_PID_FILE"
+      return 0
+    fi
+    local owner_pid
+    owner_pid="$(cat "$BOOTSTRAP_LOCK_PID_FILE" 2>/dev/null || true)"
+    if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
+      tries=$((tries + 1))
+      if [ "$tries" -ge "$max_tries" ]; then
+        return 1
+      fi
+      sleep 1
+      continue
+    fi
+    rm -rf "$BOOTSTRAP_LOCK_DIR" >/dev/null 2>&1 || true
+    sleep 0.2
+  done
+}
+
+release_bootstrap_lock() {
+  local owner_pid
+  owner_pid="$(cat "$BOOTSTRAP_LOCK_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$owner_pid" ] && [ "$owner_pid" != "$$" ]; then
+    return 0
+  fi
+  rm -rf "$BOOTSTRAP_LOCK_DIR" >/dev/null 2>&1 || true
+}
+
 if [ -z "$ACCESS_TOKEN" ]; then
   emit_error "HAPPYCAPY_ACCESS_TOKEN is empty"
   exit 1
@@ -1051,6 +1128,20 @@ if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [ -n "$RECOVER_EXISTING" ]; the
     exit 0
   fi
 fi
+
+if ! acquire_bootstrap_lock; then
+  p2222=0
+  if is_port_listening "$SSH_PORT"; then p2222=1; fi
+  p8080=0
+  if is_port_listening 8080; then p8080=1; fi
+  if [ "$p2222" -eq 1 ] && [ "$p8080" -eq 1 ]; then
+    printf '{"status":"ok","message":"bootstrap_lock_busy","p2222":%s,"p8080":%s}\n' "$p2222" "$p8080"
+    exit 0
+  fi
+  emit_error "bootstrap lock busy"
+  exit 1
+fi
+trap 'release_bootstrap_lock' EXIT INT TERM
 
 RECOVER_SCRIPT="$(install_recover_script || true)"
 if [ -z "$RECOVER_SCRIPT" ] || [ ! -x "$RECOVER_SCRIPT" ]; then
@@ -1090,6 +1181,10 @@ fi
 
 if [ -n "$CONTROL_API_BIN" ]; then
   write_control_api_server >/dev/null 2>&1 || true
+  if ! ensure_control_api_script; then
+    emit_error "failed to build/validate control api script"
+    exit 1
+  fi
 fi
 if [ -x "$CONTROL_API_SCRIPT" ]; then
   CONTROL_API_REQUIRED=1
