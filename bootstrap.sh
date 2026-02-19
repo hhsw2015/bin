@@ -95,6 +95,7 @@ SUPERVISOR_MANAGED=0
 CHISEL_OK=0
 SSHD_OK=0
 CONTROL_API_OK=0
+CONTROL_API_REQUIRED=0
 CONTROL_API_BIN=""
 
 json_escape() {
@@ -801,7 +802,15 @@ start_control_api_fallback() {
     if is_port_listening "$CONTROL_PORT"; then
       CONTROL_API_OK=1
     else
+      if [ "$CONTROL_API_REQUIRED" -eq 1 ]; then
+        run_root supervisorctl start happycapy-control-api >/dev/null 2>&1 || run_root supervisorctl restart happycapy-control-api >/dev/null 2>&1 || true
+        sleep 1
+      fi
+      if is_port_listening "$CONTROL_PORT"; then
+        CONTROL_API_OK=1
+      else
       CONTROL_API_OK=0
+      fi
     fi
     return 0
   fi
@@ -853,6 +862,7 @@ start_fallback_processes() {
   sshd_bin="$(find_sshd_bin || true)"
 
   if [ "$SUPERVISOR_MANAGED" -eq 1 ]; then
+    start_control_api_fallback || true
     return 0
   fi
 
@@ -980,13 +990,20 @@ verify_services() {
     fi
   fi
 
-  if is_port_listening "$CONTROL_PORT"; then
-    CONTROL_API_OK=1
+  if [ "$CONTROL_API_REQUIRED" -eq 1 ]; then
+    if is_port_listening "$CONTROL_PORT"; then
+      CONTROL_API_OK=1
+    else
+      CONTROL_API_OK=0
+    fi
   else
     CONTROL_API_OK=0
   fi
 
   if [ "$CHISEL_OK" -ne 1 ] || [ "$SSHD_OK" -ne 1 ]; then
+    return 1
+  fi
+  if [ "$CONTROL_API_REQUIRED" -eq 1 ] && [ "$CONTROL_API_OK" -ne 1 ]; then
     return 1
   fi
   return 0
@@ -1069,6 +1086,9 @@ fi
 if [ -n "$CONTROL_API_BIN" ]; then
   write_control_api_server >/dev/null 2>&1 || true
 fi
+if [ -n "$CONTROL_API_BIN" ] && [ -x "$CONTROL_API_SCRIPT" ]; then
+  CONTROL_API_REQUIRED=1
+fi
 
 HEAL_MAX_ROUNDS_RAW="${HAPPYCAPY_HEAL_MAX_ROUNDS:-8}"
 case "$HEAL_MAX_ROUNDS_RAW" in
@@ -1101,7 +1121,7 @@ while [ "$HEAL_ROUND" -le "$HEAL_MAX_ROUNDS" ]; do
 
   if ! verify_services; then
     HEAL_LAST_STEP="verify_services"
-    HEAL_LAST_ERR="services not healthy (chisel_ok=${CHISEL_OK}, sshd_ok=${SSHD_OK})"
+    HEAL_LAST_ERR="services not healthy (chisel_ok=${CHISEL_OK}, sshd_ok=${SSHD_OK}, control_api_ok=${CONTROL_API_OK}, control_api_required=${CONTROL_API_REQUIRED})"
     sleep "$HEAL_SLEEP_SEC"
     HEAL_ROUND=$((HEAL_ROUND + 1))
     continue
@@ -1155,7 +1175,7 @@ if [ "$OUTPUT_MODE" = "short" ]; then
     "$(json_escape "${RECOVER_SCRIPT_PATH}")" \
     "$HEAL_ROUND"
 else
-  printf '{"status":"ok","alias":"%s","chisel_server":"%s","control_api_url":"%s","control_port":%s,"chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s,"control_api_ok":%s,"heal_round":%s}\n' \
+  printf '{"status":"ok","alias":"%s","chisel_server":"%s","control_api_url":"%s","control_port":%s,"chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s,"control_api_ok":%s,"control_api_required":%s,"heal_round":%s}\n' \
     "$(json_escape "$ALIAS")" \
     "$(json_escape "${CHISEL_SERVER}")" \
     "$(json_escape "${CONTROL_API_URL}")" \
@@ -1173,6 +1193,7 @@ else
     "$CHISEL_OK" \
     "$SSHD_OK" \
     "$CONTROL_API_OK" \
+    "$CONTROL_API_REQUIRED" \
     "$HEAL_ROUND"
 fi
 
