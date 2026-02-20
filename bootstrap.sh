@@ -453,6 +453,9 @@ const cfg = {
   registryUrlPath: process.env.HAPPYCAPY_REGISTRY_URL_PATH || "",
   controlApiUrlPath: process.env.HAPPYCAPY_CONTROL_API_URL_PATH || "",
   exportTimeout: Number(process.env.HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC || "8"),
+  hardRestartSshd: ["1", "true", "yes", "on"].includes(
+    String(process.env.HAPPYCAPY_HARD_RECOVER_RESTART_SSHD || "0").toLowerCase()
+  ),
 };
 const RECOVER_LOG_PATH = "/tmp/hc-recover-only.log";
 let recoverInProgress = false;
@@ -573,9 +576,11 @@ if [ "$MODE" = "hard" ]; then
   ps -eo pid=,args= | awk '/[c]hisel server .*--port 8080/ {print $1}' | while read -r pid; do
     [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
   done
-  ps -eo pid=,args= | awk -v p="$SSH_PORT" '$0 ~ /[s]shd/ && $0 ~ ("-p " p) {print $1}' | while read -r pid; do
-    [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
-  done
+  if [ "\${HARD_RESTART_SSHD:-0}" = "1" ]; then
+    ps -eo pid=,args= | awk -v p="$SSH_PORT" '$0 ~ /[s]shd/ && $0 ~ ("-p " p) {print $1}' | while read -r pid; do
+      [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+    done
+  fi
   sleep 1
 fi
 HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
@@ -584,6 +589,7 @@ HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
     RECOVER_SCRIPT: cfg.recoverScript,
     MODE: mode || "soft",
     SSH_PORT: String(cfg.sshPort),
+    HARD_RESTART_SSHD: cfg.hardRestartSshd ? "1" : "0",
   });
   return res;
 }
@@ -602,9 +608,11 @@ if [ "$MODE" = "hard" ]; then
   ps -eo pid=,args= | awk '/[c]hisel server .*--port 8080/ {print $1}' | while read -r pid; do
     [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
   done
-  ps -eo pid=,args= | awk -v p="$SSH_PORT" '$0 ~ /[s]shd/ && $0 ~ ("-p " p) {print $1}' | while read -r pid; do
-    [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
-  done
+  if [ "\${HARD_RESTART_SSHD:-0}" = "1" ]; then
+    ps -eo pid=,args= | awk -v p="$SSH_PORT" '$0 ~ /[s]shd/ && $0 ~ ("-p " p) {print $1}' | while read -r pid; do
+      [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+    done
+  fi
   sleep 1
 fi
 HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
@@ -617,6 +625,7 @@ HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
       RECOVER_SCRIPT: cfg.recoverScript,
       MODE: mode || "soft",
       SSH_PORT: String(cfg.sshPort),
+      HARD_RESTART_SSHD: cfg.hardRestartSshd ? "1" : "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
