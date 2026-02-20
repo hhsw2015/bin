@@ -440,7 +440,7 @@ write_control_api_server() {
 #!/usr/bin/env node
 const http = require("http");
 const fs = require("fs");
-const { spawnSync } = require("child_process");
+const { spawnSync, spawn } = require("child_process");
 const { URL } = require("url");
 
 const cfg = {
@@ -457,6 +457,8 @@ const cfg = {
 let recoverInProgress = false;
 let lastRecoverAt = 0;
 let lastRecoverOk = null;
+let lastRecoverRc = null;
+let lastRecoverOutput = "";
 
 function runBash(script, timeoutMs = 15000, envExtra = {}) {
   const ret = spawnSync("bash", ["-lc", script], {
@@ -575,6 +577,66 @@ HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
   return res;
 }
 
+function startRecoverAsync(mode) {
+  const script = `
+R="$RECOVER_SCRIPT"
+if [ ! -x "$R" ]; then
+  R="$(ls -1 /home/node/*/workspace/.happycapy/happycapy-recover.sh 2>/dev/null | head -n1 || true)"
+fi
+if [ -z "$R" ] || [ ! -x "$R" ]; then
+  echo '{"status":"error","message":"no_recover_script"}'
+  exit 2
+fi
+if [ "$MODE" = "hard" ]; then
+  pkill -f "chisel server.*--port 8080" >/dev/null 2>&1 || true
+  pkill -f "sshd.*-p $SSH_PORT" >/dev/null 2>&1 || true
+  sleep 1
+fi
+HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
+`;
+  const child = spawn("bash", ["-lc", script], {
+    env: {
+      ...process.env,
+      RECOVER_SCRIPT: cfg.recoverScript,
+      MODE: mode || "soft",
+      SSH_PORT: String(cfg.sshPort),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let out = "";
+  const pushOut = (chunk) => {
+    if (!chunk) return;
+    out += chunk.toString("utf8");
+    if (out.length > 8 * 1024 * 1024) {
+      out = out.slice(-8 * 1024 * 1024);
+    }
+  };
+  if (child.stdout) child.stdout.on("data", pushOut);
+  if (child.stderr) child.stderr.on("data", pushOut);
+  const timeoutId = setTimeout(() => {
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+  }, 180000);
+  child.on("error", (err) => {
+    clearTimeout(timeoutId);
+    recoverInProgress = false;
+    lastRecoverOk = false;
+    lastRecoverRc = -1;
+    lastRecoverOutput = String(err || "recover_spawn_error");
+  });
+  child.on("close", (code) => {
+    clearTimeout(timeoutId);
+    recoverInProgress = false;
+    lastRecoverRc = Number.isInteger(code) ? code : -1;
+    lastRecoverOk = code === 0;
+    lastRecoverOutput = (out || "").trim().split(/\n/).slice(-40).join("\n");
+    const chiselServer = exportPortUrl(8080);
+    const controlApiUrl = exportPortUrl(cfg.controlPort);
+    writeRegistry(chiselServer, controlApiUrl);
+  });
+}
+
 function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, {
@@ -622,6 +684,8 @@ function collectStatus(refresh) {
     recover_in_progress: recoverInProgress,
     last_recover_at: lastRecoverAt ? new Date(lastRecoverAt).toISOString() : "",
     last_recover_ok: lastRecoverOk,
+    last_recover_rc: lastRecoverRc,
+    last_recover_output: (lastRecoverOutput || "").split(/\n/).slice(-8).join("\n"),
     ...state,
     checked_at: new Date().toISOString(),
   };
@@ -681,26 +745,31 @@ const server = http.createServer((req, res) => {
         const mode = (payload.mode || u.searchParams.get("mode") || "soft").toString().toLowerCase() === "hard" ? "hard" : "soft";
         recoverInProgress = true;
         lastRecoverAt = Date.now();
-        let rec = { ok: false, code: -1, out: "recover_not_started" };
+        lastRecoverOk = null;
+        lastRecoverRc = null;
+        lastRecoverOutput = "";
         try {
-          rec = doRecover(mode);
+          startRecoverAsync(mode);
         } catch (e) {
-          rec = { ok: false, code: -1, out: String(e || "recover_exception") };
+          recoverInProgress = false;
+          lastRecoverOk = false;
+          lastRecoverRc = -1;
+          lastRecoverOutput = String(e || "recover_exception");
+          return sendJson(res, 500, {
+            ok: false,
+            action: "recover",
+            accepted: false,
+            mode,
+            rc: -1,
+            output: lastRecoverOutput,
+            status: collectStatus(false),
+          });
         }
-        recoverInProgress = false;
-        lastRecoverOk = !!rec.ok;
-        const chiselServer = exportPortUrl(8080);
-        const controlApiUrl = exportPortUrl(cfg.controlPort);
-        const wr = writeRegistry(chiselServer, controlApiUrl);
-        return sendJson(res, rec.ok ? 200 : 500, {
-          ok: rec.ok,
+        return sendJson(res, 200, {
+          ok: true,
           action: "recover",
+          accepted: true,
           mode,
-          rc: rec.code,
-          chisel_server: chiselServer,
-          control_api_url: controlApiUrl,
-          registry_write: wr,
-          output: (rec.out || "").trim().split(/\n/).slice(-20).join("\n"),
           status: collectStatus(false),
         });
       }
