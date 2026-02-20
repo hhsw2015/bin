@@ -454,6 +454,7 @@ const cfg = {
   controlApiUrlPath: process.env.HAPPYCAPY_CONTROL_API_URL_PATH || "",
   exportTimeout: Number(process.env.HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC || "8"),
 };
+const RECOVER_LOG_PATH = "/tmp/hc-recover-only.log";
 let recoverInProgress = false;
 let lastRecoverAt = 0;
 let lastRecoverOk = null;
@@ -552,6 +553,12 @@ function writeRegistry(chiselServer, controlApiUrl) {
   return { ok: res.ok, code: res.code, output: (res.out || "").trim() };
 }
 
+function recoverLog(line) {
+  try {
+    fs.appendFileSync(RECOVER_LOG_PATH, `[${new Date().toISOString()}] ${line}\n`);
+  } catch {}
+}
+
 function doRecover(mode) {
   const script = `
 R="$RECOVER_SCRIPT"
@@ -563,8 +570,12 @@ if [ -z "$R" ] || [ ! -x "$R" ]; then
   exit 2
 fi
 if [ "$MODE" = "hard" ]; then
-  pkill -f "chisel server.*--port 8080" >/dev/null 2>&1 || true
-  pkill -f "sshd.*-p $SSH_PORT" >/dev/null 2>&1 || true
+  ps -eo pid=,args= | awk '/[c]hisel server .*--port 8080/ {print $1}' | while read -r pid; do
+    [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+  done
+  ps -eo pid=,args= | awk -v p="$SSH_PORT" '$0 ~ /[s]shd/ && $0 ~ ("-p " p) {print $1}' | while read -r pid; do
+    [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+  done
   sleep 1
 fi
 HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
@@ -588,12 +599,18 @@ if [ -z "$R" ] || [ ! -x "$R" ]; then
   exit 2
 fi
 if [ "$MODE" = "hard" ]; then
-  pkill -f "chisel server.*--port 8080" >/dev/null 2>&1 || true
-  pkill -f "sshd.*-p $SSH_PORT" >/dev/null 2>&1 || true
+  ps -eo pid=,args= | awk '/[c]hisel server .*--port 8080/ {print $1}' | while read -r pid; do
+    [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+  done
+  ps -eo pid=,args= | awk -v p="$SSH_PORT" '$0 ~ /[s]shd/ && $0 ~ ("-p " p) {print $1}' | while read -r pid; do
+    [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1 || true
+  done
   sleep 1
 fi
 HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
 `;
+  const startedAt = Date.now();
+  recoverLog(`recover_start mode=${mode || "soft"}`);
   const child = spawn("bash", ["-lc", script], {
     env: {
       ...process.env,
@@ -624,13 +641,28 @@ HAPPYCAPY_RECOVER_CHAIN=1 bash "$R"
     lastRecoverOk = false;
     lastRecoverRc = -1;
     lastRecoverOutput = String(err || "recover_spawn_error");
+    recoverLog(`recover_error mode=${mode || "soft"} rc=-1 detail=${lastRecoverOutput}`);
   });
-  child.on("close", (code) => {
+  child.on("close", (code, signal) => {
     clearTimeout(timeoutId);
     recoverInProgress = false;
     lastRecoverRc = Number.isInteger(code) ? code : -1;
-    lastRecoverOk = code === 0;
-    lastRecoverOutput = (out || "").trim().split(/\n/).slice(-40).join("\n");
+    lastRecoverOk = code === 0 && !signal;
+    const outTail = (out || "").trim().split(/\n/).slice(-40).join("\n");
+    if (outTail) {
+      lastRecoverOutput = outTail;
+    } else if (signal) {
+      lastRecoverOutput = `recover_terminated signal=${signal}`;
+    } else {
+      lastRecoverOutput = "";
+    }
+    const durationMs = Date.now() - startedAt;
+    recoverLog(
+      `recover_end mode=${mode || "soft"} ok=${lastRecoverOk} rc=${lastRecoverRc} signal=${signal || ""} duration_ms=${durationMs}`
+    );
+    if (lastRecoverOutput) {
+      recoverLog(`recover_output_tail ${lastRecoverOutput.replace(/\n/g, "\\n").slice(0, 1500)}`);
+    }
     const chiselServer = exportPortUrl(8080);
     const controlApiUrl = exportPortUrl(cfg.controlPort);
     writeRegistry(chiselServer, controlApiUrl);
@@ -748,6 +780,7 @@ const server = http.createServer((req, res) => {
         lastRecoverOk = null;
         lastRecoverRc = null;
         lastRecoverOutput = "";
+        recoverLog(`recover_accept mode=${mode}`);
         try {
           startRecoverAsync(mode);
         } catch (e) {
@@ -755,6 +788,7 @@ const server = http.createServer((req, res) => {
           lastRecoverOk = false;
           lastRecoverRc = -1;
           lastRecoverOutput = String(e || "recover_exception");
+          recoverLog(`recover_exception mode=${mode} detail=${lastRecoverOutput}`);
           return sendJson(res, 500, {
             ok: false,
             action: "recover",
