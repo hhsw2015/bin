@@ -53,6 +53,7 @@ CONTROL_PORT="${HAPPYCAPY_CONTROL_PORT:-18080}"
 CONTROL_API_SCRIPT="${PERSIST_DIR}/happycapy-control-api.js"
 CONTROL_API_PID_FILE="${PERSIST_DIR}/happycapy-control-api.pid"
 CONTROL_API_URL_PATH="${HAPPYCAPY_CONTROL_API_URL_PATH:-${PERSIST_DIR}/control_api_url.txt}"
+AUTORESTORE_ENV_FILE="${HAPPYCAPY_AUTORESTORE_ENV_FILE:-${PERSIST_DIR}/autorestore.env}"
 BOOTSTRAP_LOCK_DIR="${PERSIST_DIR}/bootstrap.lock"
 BOOTSTRAP_LOCK_PID_FILE="${BOOTSTRAP_LOCK_DIR}/pid"
 OUTPUT_MODE="${HAPPYCAPY_OUTPUT_MODE:-}"
@@ -108,6 +109,10 @@ SSHD_OK=0
 CONTROL_API_OK=0
 CONTROL_API_REQUIRED=0
 CONTROL_API_BIN=""
+AUTORESTORE_DOCKER=0
+AUTORESTORE_BROWSER=""
+AUTORESTORE_DESKTOP=0
+AUTORESTORE_DESKTOP_ENV=0
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -262,6 +267,163 @@ install_packages() {
   elif command -v yum >/dev/null 2>&1; then
     with_retry 2 run_root yum install -y curl gzip openssh-server supervisor nodejs >/tmp/hc-yum-install.log 2>&1 || true
   fi
+}
+
+load_autorestore_preferences() {
+  AUTORESTORE_DOCKER=0
+  AUTORESTORE_BROWSER=""
+  AUTORESTORE_DESKTOP=0
+  AUTORESTORE_DESKTOP_ENV=0
+  [ -f "$AUTORESTORE_ENV_FILE" ] || return 0
+  while IFS='=' read -r key value; do
+    key="$(printf '%s' "${key:-}" | tr -d '[:space:]')"
+    value="$(printf '%s' "${value:-}" | tr -d '\r')"
+    case "$key" in
+      HAPPYCAPY_AUTORESTORE_DOCKER)
+        case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+          1|true|yes|on) AUTORESTORE_DOCKER=1 ;;
+        esac
+        ;;
+      HAPPYCAPY_AUTORESTORE_BROWSER)
+        value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+        case "$value" in
+          chromium|firefox|chrome|auto) AUTORESTORE_BROWSER="$value" ;;
+        esac
+        ;;
+      HAPPYCAPY_AUTORESTORE_DESKTOP)
+        case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+          1|true|yes|on) AUTORESTORE_DESKTOP=1 ;;
+        esac
+        ;;
+      HAPPYCAPY_AUTORESTORE_DESKTOP_ENV)
+        case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+          1|true|yes|on) AUTORESTORE_DESKTOP_ENV=1 ;;
+          *) AUTORESTORE_DESKTOP_ENV=0 ;;
+        esac
+        ;;
+    esac
+  done < "$AUTORESTORE_ENV_FILE"
+}
+
+ensure_autorestore_docker() {
+  [ "$AUTORESTORE_DOCKER" -eq 1 ] || return 0
+  can_root || return 0
+  if ! command -v docker >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+      run_root apt-get update -y >/tmp/hc-autorestore-docker-install.log 2>&1 || true
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io >>/tmp/hc-autorestore-docker-install.log 2>&1 || true
+    elif command -v apk >/dev/null 2>&1; then
+      run_root apk add --no-cache docker >/tmp/hc-autorestore-docker-install.log 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+      run_root yum install -y docker >/tmp/hc-autorestore-docker-install.log 2>&1 || true
+    fi
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    run_root service docker start >/tmp/hc-autorestore-docker-service.log 2>&1 || run_root systemctl start docker >/tmp/hc-autorestore-docker-service.log 2>&1 || true
+  fi
+}
+
+ensure_autorestore_browser() {
+  local browser="$AUTORESTORE_BROWSER"
+  [ -n "$browser" ] || return 0
+  [ "$browser" != "auto" ] || browser="chromium"
+  can_root || return 0
+
+  case "$browser" in
+    chromium)
+      if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+        return 0
+      fi
+      if command -v apt-get >/dev/null 2>&1; then
+        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium >>/tmp/hc-autorestore-browser-install.log 2>&1 || run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium-browser >>/tmp/hc-autorestore-browser-install.log 2>&1 || true
+      elif command -v apk >/dev/null 2>&1; then
+        run_root apk add --no-cache chromium >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+      elif command -v yum >/dev/null 2>&1; then
+        run_root yum install -y chromium >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+      fi
+      ;;
+    firefox)
+      if command -v firefox >/dev/null 2>&1; then
+        return 0
+      fi
+      if command -v apt-get >/dev/null 2>&1; then
+        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y firefox-esr >>/tmp/hc-autorestore-browser-install.log 2>&1 || run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y firefox >>/tmp/hc-autorestore-browser-install.log 2>&1 || true
+      elif command -v apk >/dev/null 2>&1; then
+        run_root apk add --no-cache firefox >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+      elif command -v yum >/dev/null 2>&1; then
+        run_root yum install -y firefox >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+      fi
+      ;;
+    chrome)
+      if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
+        return 0
+      fi
+      if command -v apt-get >/dev/null 2>&1; then
+        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable >>/tmp/hc-autorestore-browser-install.log 2>&1 || true
+      elif command -v yum >/dev/null 2>&1; then
+        run_root yum install -y google-chrome-stable >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+      fi
+      ;;
+  esac
+}
+
+ensure_autorestore_desktop_packages() {
+  [ "$AUTORESTORE_DESKTOP" -eq 1 ] || return 0
+  can_root || return 0
+  if command -v apt-get >/dev/null 2>&1; then
+    run_root apt-get update -y >/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb x11vnc novnc websockify >>/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    if [ "$AUTORESTORE_DESKTOP_ENV" -eq 1 ]; then
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    fi
+  elif command -v apk >/dev/null 2>&1; then
+    run_root apk add --no-cache xvfb x11vnc novnc websockify >/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    if [ "$AUTORESTORE_DESKTOP_ENV" -eq 1 ]; then
+      run_root apk add --no-cache openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    fi
+  elif command -v yum >/dev/null 2>&1; then
+    run_root yum install -y xorg-x11-server-Xvfb x11vnc novnc python3-websockify >/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    if [ "$AUTORESTORE_DESKTOP_ENV" -eq 1 ]; then
+      run_root yum install -y openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    fi
+  fi
+}
+
+restore_persisted_services() {
+  local svc_dir="$PERSIST_DIR/services"
+  [ -d "$svc_dir" ] || return 0
+  local cmdf name pidf logf pid cmd
+  for cmdf in "$svc_dir"/*.cmd; do
+    [ -f "$cmdf" ] || continue
+    name="$(basename "$cmdf" .cmd)"
+    [ -n "$name" ] || continue
+    pidf="$svc_dir/$name.pid"
+    logf="$svc_dir/$name.log"
+    pid=0
+    if [ -f "$pidf" ]; then
+      pid="$(cat "$pidf" 2>/dev/null | tr -dc '0-9')"
+    fi
+    [ -z "$pid" ] && pid=0
+    if [ "$pid" -gt 0 ] && kill -0 "$pid" >/dev/null 2>&1; then
+      continue
+    fi
+    cmd="$(cat "$cmdf" 2>/dev/null || true)"
+    [ -n "$cmd" ] || continue
+    nohup bash -lc "$cmd" >>"$logf" 2>&1 &
+    printf '%s' "$!" > "$pidf"
+    sleep 0.2
+  done
+}
+
+run_workspace_autorestore() {
+  load_autorestore_preferences
+  ensure_autorestore_docker || true
+  ensure_autorestore_browser || true
+  ensure_autorestore_desktop_packages || true
+  restore_persisted_services || true
 }
 
 install_chisel() {
@@ -1171,6 +1333,7 @@ watchdog_loop() {
   while true; do
     setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER"
     start_fallback_processes "$CHISEL_BIN"
+    run_workspace_autorestore
     if verify_services; then
       local server_now control_now
       server_now="$(query_preview_url_for_port 8080 || true)"
@@ -1304,6 +1467,8 @@ else
   emit_error "failed to create control api server script"
   exit 1
 fi
+
+run_workspace_autorestore
 
 HEAL_MAX_ROUNDS_RAW="${HAPPYCAPY_HEAL_MAX_ROUNDS:-8}"
 case "$HEAL_MAX_ROUNDS_RAW" in
