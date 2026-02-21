@@ -423,7 +423,31 @@ ensure_autorestore_desktop_packages() {
 restore_persisted_services() {
   local svc_dir="$PERSIST_DIR/services"
   [ -d "$svc_dir" ] || return 0
-  local cmdf name pidf logf pid cmd
+  local cmdf pidf logf pid cmd svc_sub name
+
+  # New layout: .happycapy/services/<service>/start.cmd
+  for svc_sub in "$svc_dir"/*; do
+    [ -d "$svc_sub" ] || continue
+    cmdf="$svc_sub/start.cmd"
+    pidf="$svc_sub/service.pid"
+    logf="$svc_sub/service.log"
+    [ -f "$cmdf" ] || continue
+    pid=0
+    if [ -f "$pidf" ]; then
+      pid="$(cat "$pidf" 2>/dev/null | tr -dc '0-9')"
+    fi
+    [ -z "$pid" ] && pid=0
+    if [ "$pid" -gt 0 ] && kill -0 "$pid" >/dev/null 2>&1; then
+      continue
+    fi
+    cmd="$(cat "$cmdf" 2>/dev/null || true)"
+    [ -n "$cmd" ] || continue
+    nohup bash -lc "$cmd" >>"$logf" 2>&1 &
+    printf '%s' "$!" > "$pidf"
+    sleep 0.2
+  done
+
+  # Legacy layout compatibility: .happycapy/services/<name>.cmd
   for cmdf in "$svc_dir"/*.cmd; do
     [ -f "$cmdf" ] || continue
     name="$(basename "$cmdf" .cmd)"
