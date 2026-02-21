@@ -127,6 +127,8 @@ AUTORESTORE_DOCKER=0
 AUTORESTORE_BROWSER=""
 AUTORESTORE_DESKTOP=0
 AUTORESTORE_DESKTOP_ENV=0
+# Default policy: restore app prerequisites/data only; persisted services are start-on-demand.
+AUTORESTORE_START_SERVICES=0
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
@@ -288,6 +290,7 @@ load_autorestore_preferences() {
   AUTORESTORE_BROWSER=""
   AUTORESTORE_DESKTOP=0
   AUTORESTORE_DESKTOP_ENV=0
+  AUTORESTORE_START_SERVICES=0
   [ -f "$AUTORESTORE_ENV_FILE" ] || return 0
   while IFS='=' read -r key value; do
     key="$(printf '%s' "${key:-}" | tr -d '[:space:]')"
@@ -313,6 +316,12 @@ load_autorestore_preferences() {
         case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
           1|true|yes|on) AUTORESTORE_DESKTOP_ENV=1 ;;
           *) AUTORESTORE_DESKTOP_ENV=0 ;;
+        esac
+        ;;
+      HAPPYCAPY_AUTORESTORE_START_SERVICES)
+        case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+          1|true|yes|on) AUTORESTORE_START_SERVICES=1 ;;
+          *) AUTORESTORE_START_SERVICES=0 ;;
         esac
         ;;
       HAPPYCAPY_EXTERNAL_RECOVER_URL)
@@ -500,7 +509,9 @@ run_workspace_autorestore() {
   ensure_autorestore_docker || true
   ensure_autorestore_browser || true
   ensure_autorestore_desktop_packages || true
-  restore_persisted_services || true
+  if [ "$AUTORESTORE_START_SERVICES" -eq 1 ]; then
+    restore_persisted_services || true
+  fi
   restore_custom_recover_tasks || true
   run_external_recover_url_once || true
 }
