@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Optional mode argument:
+# --autorestore-only: run workspace autorestore once and exit quickly.
+MODE_ARG="${1:-}"
+AUTORESTORE_ONLY=0
+if [ "$MODE_ARG" = "--autorestore-only" ]; then
+  AUTORESTORE_ONLY=1
+  shift || true
+fi
+
 # Expected env vars (auto injected by: happycapy_ops.py bootstrap-via-tmate --script-url):
 # - HAPPYCAPY_ACCESS_TOKEN
 # - HAPPYCAPY_ALIAS
@@ -54,6 +63,11 @@ CONTROL_API_SCRIPT="${PERSIST_DIR}/happycapy-control-api.js"
 CONTROL_API_PID_FILE="${PERSIST_DIR}/happycapy-control-api.pid"
 CONTROL_API_URL_PATH="${HAPPYCAPY_CONTROL_API_URL_PATH:-${PERSIST_DIR}/control_api_url.txt}"
 AUTORESTORE_ENV_FILE="${HAPPYCAPY_AUTORESTORE_ENV_FILE:-${PERSIST_DIR}/autorestore.env}"
+EXTERNAL_RECOVER_URL="${HAPPYCAPY_EXTERNAL_RECOVER_URL:-}"
+EXTERNAL_RECOVER_STATE_FILE="${PERSIST_DIR}/external-recover.state"
+EXTERNAL_RECOVER_LOG="${HAPPYCAPY_EXTERNAL_RECOVER_LOG:-/tmp/happycapy-external-recover.log}"
+AUTORESTORE_WORKER_PID_FILE="${PERSIST_DIR}/autorestore-worker.pid"
+AUTORESTORE_WORKER_LOG="${HAPPYCAPY_AUTORESTORE_LOG:-/tmp/happycapy-autorestore.log}"
 BOOTSTRAP_LOCK_DIR="${PERSIST_DIR}/bootstrap.lock"
 BOOTSTRAP_LOCK_PID_FILE="${BOOTSTRAP_LOCK_DIR}/pid"
 OUTPUT_MODE="${HAPPYCAPY_OUTPUT_MODE:-}"
@@ -301,6 +315,11 @@ load_autorestore_preferences() {
           *) AUTORESTORE_DESKTOP_ENV=0 ;;
         esac
         ;;
+      HAPPYCAPY_EXTERNAL_RECOVER_URL)
+        if [ -z "$EXTERNAL_RECOVER_URL" ]; then
+          EXTERNAL_RECOVER_URL="$value"
+        fi
+        ;;
     esac
   done < "$AUTORESTORE_ENV_FILE"
 }
@@ -418,12 +437,104 @@ restore_persisted_services() {
   done
 }
 
+restore_custom_recover_tasks() {
+  local task_dir="$PERSIST_DIR/recover-tasks"
+  [ -d "$task_dir" ] || return 0
+  local cmdf name pidf logf pid cmd
+  for cmdf in "$task_dir"/*.cmd; do
+    [ -f "$cmdf" ] || continue
+    name="$(basename "$cmdf" .cmd)"
+    [ -n "$name" ] || continue
+    pidf="$task_dir/$name.pid"
+    logf="$task_dir/$name.log"
+    pid=0
+    if [ -f "$pidf" ]; then
+      pid="$(cat "$pidf" 2>/dev/null | tr -dc '0-9')"
+    fi
+    [ -z "$pid" ] && pid=0
+    if [ "$pid" -gt 0 ] && kill -0 "$pid" >/dev/null 2>&1; then
+      continue
+    fi
+    cmd="$(cat "$cmdf" 2>/dev/null || true)"
+    [ -n "$cmd" ] || continue
+    nohup bash -lc "$cmd" >>"$logf" 2>&1 &
+    printf '%s' "$!" > "$pidf"
+    sleep 0.2
+  done
+}
+
+run_external_recover_url_once() {
+  local url boot_id stamp current target rc
+  url="$(printf '%s' "$EXTERNAL_RECOVER_URL" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [ -n "$url" ] || return 0
+  case "$url" in
+    http://*|https://*) ;;
+    *) return 0 ;;
+  esac
+  boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  [ -z "$boot_id" ] && boot_id="boot-unknown"
+  current="${url}|${boot_id}"
+  stamp="$(cat "$EXTERNAL_RECOVER_STATE_FILE" 2>/dev/null || true)"
+  if [ "$stamp" = "$current" ]; then
+    return 0
+  fi
+
+  target="${PERSIST_DIR}/external-recover.sh"
+  rc=0
+  curl -fsSL --retry 2 --retry-delay 1 --retry-connrefused "$url" -o "$target" >/dev/null 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    return 0
+  fi
+  chmod 700 "$target" >/dev/null 2>&1 || true
+  set +e
+  HAPPYCAPY_RECOVER_CHAIN=1 bash "$target" >>"$EXTERNAL_RECOVER_LOG" 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$current" > "$EXTERNAL_RECOVER_STATE_FILE"
+  fi
+}
+
 run_workspace_autorestore() {
   load_autorestore_preferences
   ensure_autorestore_docker || true
   ensure_autorestore_browser || true
   ensure_autorestore_desktop_packages || true
   restore_persisted_services || true
+  restore_custom_recover_tasks || true
+  run_external_recover_url_once || true
+}
+
+start_autorestore_worker_detached() {
+  mkdir -p "$PERSIST_DIR"
+  local old_pid boot_bin
+  old_pid=0
+  if [ -f "$AUTORESTORE_WORKER_PID_FILE" ]; then
+    old_pid="$(cat "$AUTORESTORE_WORKER_PID_FILE" 2>/dev/null | tr -dc '0-9')"
+  fi
+  [ -z "$old_pid" ] && old_pid=0
+  if [ "$old_pid" -gt 0 ] && kill -0 "$old_pid" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  boot_bin="$PERSIST_BOOTSTRAP"
+  if [ ! -x "$boot_bin" ]; then
+    if [ -x "$0" ]; then
+      boot_bin="$0"
+    else
+      return 1
+    fi
+  fi
+
+  nohup env \
+    HAPPYCAPY_PERSIST_ROOT="$PERSIST_ROOT" \
+    HAPPYCAPY_AUTORESTORE_ENV_FILE="$AUTORESTORE_ENV_FILE" \
+    HAPPYCAPY_EXTERNAL_RECOVER_URL="$EXTERNAL_RECOVER_URL" \
+    HAPPYCAPY_OUTPUT_MODE=short \
+    HAPPYCAPY_WATCHDOG_MODE=0 \
+    HAPPYCAPY_RECOVER_CHAIN=0 \
+    bash "$boot_bin" --autorestore-only >>"$AUTORESTORE_WORKER_LOG" 2>&1 &
+  printf '%s\n' "$!" > "$AUTORESTORE_WORKER_PID_FILE"
 }
 
 install_chisel() {
@@ -1333,7 +1444,6 @@ watchdog_loop() {
   while true; do
     setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER"
     start_fallback_processes "$CHISEL_BIN"
-    run_workspace_autorestore
     if verify_services; then
       local server_now control_now
       server_now="$(query_preview_url_for_port 8080 || true)"
@@ -1341,6 +1451,9 @@ watchdog_loop() {
       if [ -n "$server_now" ]; then
         HAPPYCAPY_CHISEL_SERVER="$server_now" HAPPYCAPY_CONTROL_API_URL="$control_now" "$BOOT_WRITER" >/tmp/happycapy-registry-report.log 2>&1 || true
       fi
+      # Keep workspace restore behind core connectivity:
+      # SSH/chisel/control must be healthy first, then run restore tasks.
+      run_workspace_autorestore
     fi
     sleep "$interval"
   done
@@ -1378,6 +1491,13 @@ release_bootstrap_lock() {
   fi
   rm -rf "$BOOTSTRAP_LOCK_DIR" >/dev/null 2>&1 || true
 }
+
+if [ "$AUTORESTORE_ONLY" -eq 1 ]; then
+  mkdir -p "$PERSIST_DIR"
+  run_workspace_autorestore || true
+  printf '{"status":"ok","mode":"autorestore_only"}\n'
+  exit 0
+fi
 
 if [ -z "$ACCESS_TOKEN" ]; then
   emit_error "HAPPYCAPY_ACCESS_TOKEN is empty"
@@ -1467,8 +1587,6 @@ else
   emit_error "failed to create control api server script"
   exit 1
 fi
-
-run_workspace_autorestore
 
 HEAL_MAX_ROUNDS_RAW="${HAPPYCAPY_HEAL_MAX_ROUNDS:-8}"
 case "$HEAL_MAX_ROUNDS_RAW" in
@@ -1575,6 +1693,11 @@ else
     "$CONTROL_API_OK" \
     "$CONTROL_API_REQUIRED" \
     "$HEAL_ROUND"
+fi
+
+if [ "$WATCHDOG_MODE" -ne 1 ] || [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" = "1" ]; then
+  # Do not block SSH readiness path: run restore in detached worker.
+  start_autorestore_worker_detached || true
 fi
 
 if [ "$WATCHDOG_MODE" -eq 1 ] && [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ]; then
