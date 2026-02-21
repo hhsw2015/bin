@@ -62,6 +62,7 @@ CONTROL_PORT="${HAPPYCAPY_CONTROL_PORT:-18080}"
 CONTROL_API_SCRIPT="${PERSIST_DIR}/happycapy-control-api.js"
 CONTROL_API_PID_FILE="${PERSIST_DIR}/happycapy-control-api.pid"
 CONTROL_API_URL_PATH="${HAPPYCAPY_CONTROL_API_URL_PATH:-${PERSIST_DIR}/control_api_url.txt}"
+HEARTBEAT_URL_PATH="${HAPPYCAPY_HEARTBEAT_URL_PATH:-${PERSIST_DIR}/heartbeat_url.txt}"
 AUTORESTORE_ENV_FILE="${HAPPYCAPY_AUTORESTORE_ENV_FILE:-${PERSIST_DIR}/autorestore.env}"
 EXTERNAL_RECOVER_URL="${HAPPYCAPY_EXTERNAL_RECOVER_URL:-}"
 EXTERNAL_RECOVER_STATE_FILE="${PERSIST_DIR}/external-recover.state"
@@ -91,6 +92,36 @@ case "$WATCHDOG_INTERVAL_RAW" in
   *)
     WATCHDOG_INTERVAL_SEC="$WATCHDOG_INTERVAL_RAW"
     ;;
+esac
+HEARTBEAT_INTERVAL_RAW="${HAPPYCAPY_HEARTBEAT_INTERVAL_SEC:-20}"
+case "$HEARTBEAT_INTERVAL_RAW" in
+  ''|*[!0-9]*)
+    HEARTBEAT_INTERVAL_SEC=20
+    ;;
+  *)
+    HEARTBEAT_INTERVAL_SEC="$HEARTBEAT_INTERVAL_RAW"
+    ;;
+esac
+if [ "$HEARTBEAT_INTERVAL_SEC" -lt 5 ] 2>/dev/null; then
+  HEARTBEAT_INTERVAL_SEC=5
+fi
+HEARTBEAT_TIMEOUT_RAW="${HAPPYCAPY_HEARTBEAT_TIMEOUT_SEC:-4}"
+case "$HEARTBEAT_TIMEOUT_RAW" in
+  ''|*[!0-9]*)
+    HEARTBEAT_TIMEOUT_SEC=4
+    ;;
+  *)
+    HEARTBEAT_TIMEOUT_SEC="$HEARTBEAT_TIMEOUT_RAW"
+    ;;
+esac
+if [ "$HEARTBEAT_TIMEOUT_SEC" -lt 2 ] 2>/dev/null; then
+  HEARTBEAT_TIMEOUT_SEC=2
+fi
+HEARTBEAT_LOG_PATH="${HAPPYCAPY_HEARTBEAT_LOG_PATH:-/tmp/happycapy-heartbeat.log}"
+HEARTBEAT_EXTERNAL_KEEPALIVE_RAW="$(printf '%s' "${HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE:-1}" | tr '[:upper:]' '[:lower:]')"
+HEARTBEAT_EXTERNAL_KEEPALIVE=0
+case "$HEARTBEAT_EXTERNAL_KEEPALIVE_RAW" in
+  1|true|yes|on) HEARTBEAT_EXTERNAL_KEEPALIVE=1 ;;
 esac
 EXPORT_PORT_TIMEOUT_RAW="${HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC:-8}"
 case "$EXPORT_PORT_TIMEOUT_RAW" in
@@ -169,6 +200,44 @@ control_api_http_ready() {
     return 1
   fi
   printf '%s' "$body" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'
+}
+
+control_api_heartbeat() {
+  local source="${1:-watchdog-local}"
+  local body
+  body="$(curl -sS -m "$HEARTBEAT_TIMEOUT_SEC" "http://127.0.0.1:${CONTROL_PORT}/heartbeat?source=${source}" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    return 1
+  fi
+  printf '%s' "$body" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'
+}
+
+heartbeat_log() {
+  local msg="$1"
+  printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >> "$HEARTBEAT_LOG_PATH" 2>/dev/null || true
+}
+
+control_api_external_heartbeat() {
+  local source="${1:-watchdog-external}"
+  local control_url body
+  if [ "$HEARTBEAT_EXTERNAL_KEEPALIVE" -ne 1 ]; then
+    return 2
+  fi
+  control_url=""
+  if [ -f "$CONTROL_API_URL_PATH" ]; then
+    control_url="$(head -n1 "$CONTROL_API_URL_PATH" | tr -d '\r')"
+  fi
+  if [ -z "$control_url" ]; then
+    return 2
+  fi
+  body="$(curl -sS -m "$HEARTBEAT_TIMEOUT_SEC" "${control_url%/}/heartbeat?source=${source}" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    return 1
+  fi
+  if ! printf '%s' "$body" | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true'; then
+    return 1
+  fi
+  return 0
 }
 
 find_sshd_bin() {
@@ -680,6 +749,7 @@ REGISTRY_BASE="${REGISTRY_BASE}"
 REGISTRY_URL_PATH="${REGISTRY_URL_PATH}"
 CONTROL_PORT="${CONTROL_PORT}"
 CONTROL_API_URL_PATH="${CONTROL_API_URL_PATH}"
+HEARTBEAT_URL_PATH="${HEARTBEAT_URL_PATH}"
 EXPORT_PORT_TIMEOUT_SEC="${EXPORT_PORT_TIMEOUT_SEC}"
 UPLOAD_TIMEOUT_SEC="${UPLOAD_TIMEOUT_SEC}"
 
@@ -708,10 +778,14 @@ if [ -z "\$control_url" ]; then
     control_url="https://\${preview2#https://}"
   fi
 fi
+heartbeat_url=""
+if [ -n "\$control_url" ]; then
+  heartbeat_url="\${control_url%/}/heartbeat"
+fi
 now="\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 tmpf="/tmp/\${REGISTRY_FILE}"
 cat > "\$tmpf" <<JSON
-{"schema":"happycapy-registry-v1","happycapy_username":"\$ALIAS","alias":"\$ALIAS","chisel_server":"\$server","chisel_auth":"\$CHISEL_AUTH","ssh_user":"\$SSH_USER","ssh_password":"\$SSH_PASSWORD","ssh_port":\$SSH_PORT,"local_port":\$LOCAL_PORT,"remote_port":\$SSH_PORT,"control_api_port":\$CONTROL_PORT,"control_api_url":"\$control_url","updated_at":"\$now","service_count":0,"services":[]}
+{"schema":"happycapy-registry-v1","happycapy_username":"\$ALIAS","alias":"\$ALIAS","chisel_server":"\$server","chisel_auth":"\$CHISEL_AUTH","ssh_user":"\$SSH_USER","ssh_password":"\$SSH_PASSWORD","ssh_port":\$SSH_PORT,"local_port":\$LOCAL_PORT,"remote_port":\$SSH_PORT,"control_api_port":\$CONTROL_PORT,"control_api_url":"\$control_url","heartbeat_url":"\$heartbeat_url","updated_at":"\$now","service_count":0,"services":[]}
 JSON
 
 attempt=1
@@ -724,6 +798,10 @@ while [ "\$attempt" -le 2 ]; do
     if [ -n "\$control_url" ]; then
       mkdir -p "\$(dirname "\$CONTROL_API_URL_PATH")" 2>/dev/null || true
       printf '%s\n' "\$control_url" > "\$CONTROL_API_URL_PATH"
+    fi
+    if [ -n "\$heartbeat_url" ]; then
+      mkdir -p "\$(dirname "\$HEARTBEAT_URL_PATH")" 2>/dev/null || true
+      printf '%s\n' "\$heartbeat_url" > "\$HEARTBEAT_URL_PATH"
     fi
     exit 0
   fi
@@ -760,6 +838,11 @@ const cfg = {
   writer: process.env.HAPPYCAPY_REGISTRY_WRITER || "",
   registryUrlPath: process.env.HAPPYCAPY_REGISTRY_URL_PATH || "",
   controlApiUrlPath: process.env.HAPPYCAPY_CONTROL_API_URL_PATH || "",
+  heartbeatUrlPath: process.env.HAPPYCAPY_HEARTBEAT_URL_PATH || "",
+  heartbeatIntervalSec: Number(process.env.HAPPYCAPY_HEARTBEAT_INTERVAL_SEC || "20"),
+  heartbeatExternalKeepalive: ["1", "true", "yes", "on"].includes(
+    String(process.env.HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE || "1").toLowerCase()
+  ),
   exportTimeout: Number(process.env.HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC || "8"),
   hardRestartSshd: ["1", "true", "yes", "on"].includes(
     String(process.env.HAPPYCAPY_HARD_RECOVER_RESTART_SSHD || "0").toLowerCase()
@@ -771,6 +854,23 @@ let lastRecoverAt = 0;
 let lastRecoverOk = null;
 let lastRecoverRc = null;
 let lastRecoverOutput = "";
+let heartbeatCount = 0;
+let lastHeartbeatAt = 0;
+let lastHeartbeatSource = "";
+let lastHeartbeatVia = "";
+
+function normalizeHeartbeatSource(raw, fallback = "unknown") {
+  const src = String(raw || "").trim();
+  if (!src) return fallback;
+  return src.replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 64) || fallback;
+}
+
+function touchHeartbeat(source, via) {
+  heartbeatCount += 1;
+  lastHeartbeatAt = Date.now();
+  lastHeartbeatSource = normalizeHeartbeatSource(source, "unknown");
+  lastHeartbeatVia = normalizeHeartbeatSource(via, "unknown");
+}
 
 function runBash(script, timeoutMs = 15000, envExtra = {}) {
   const ret = spawnSync("bash", ["-lc", script], {
@@ -1000,9 +1100,16 @@ function collectStatus(refresh) {
   const state = runtimeState();
   let chiselServer = "";
   let controlApiUrl = readText(cfg.controlApiUrlPath);
+  let heartbeatUrl = readText(cfg.heartbeatUrlPath);
   if (refresh) {
     chiselServer = exportPortUrl(8080);
     controlApiUrl = exportPortUrl(cfg.controlPort) || controlApiUrl;
+    if (!heartbeatUrl && controlApiUrl) {
+      heartbeatUrl = `${controlApiUrl.replace(/\/+$/, "")}/heartbeat`;
+    }
+  }
+  if (!heartbeatUrl && controlApiUrl) {
+    heartbeatUrl = `${controlApiUrl.replace(/\/+$/, "")}/heartbeat`;
   }
   if (!chiselServer) {
     chiselServer = "";
@@ -1026,6 +1133,7 @@ function collectStatus(refresh) {
     alias: cfg.alias,
     control_port: cfg.controlPort,
     control_api_url: controlApiUrl,
+    heartbeat_url: heartbeatUrl,
     chisel_server: chiselServer,
     registry_url: readText(cfg.registryUrlPath),
     runtime_state: runtimeStateValue,
@@ -1035,6 +1143,12 @@ function collectStatus(refresh) {
     last_recover_ok: lastRecoverOk,
     last_recover_rc: lastRecoverRc,
     last_recover_output: (lastRecoverOutput || "").split(/\n/).slice(-8).join("\n"),
+    heartbeat_count: heartbeatCount,
+    heartbeat_interval_sec: Math.max(5, Number(cfg.heartbeatIntervalSec || 20)),
+    heartbeat_external_keepalive: Boolean(cfg.heartbeatExternalKeepalive),
+    last_heartbeat_at: lastHeartbeatAt ? new Date(lastHeartbeatAt).toISOString() : "",
+    last_heartbeat_source: lastHeartbeatSource,
+    last_heartbeat_via: lastHeartbeatVia,
     ...state,
     checked_at: new Date().toISOString(),
   };
@@ -1042,6 +1156,50 @@ function collectStatus(refresh) {
 
 const server = http.createServer((req, res) => {
   const u = new URL(req.url || "/", `http://127.0.0.1:${cfg.controlPort}`);
+  if (req.method === "GET" && u.pathname === "/heartbeat") {
+    const source = u.searchParams.get("source") || "external";
+    touchHeartbeat(source, "get");
+    return sendJson(res, 200, {
+      ok: true,
+      action: "heartbeat",
+      alias: cfg.alias,
+      alive: true,
+      heartbeat_count: heartbeatCount,
+      last_heartbeat_at: new Date(lastHeartbeatAt).toISOString(),
+      last_heartbeat_source: lastHeartbeatSource,
+      checked_at: new Date().toISOString(),
+    });
+  }
+
+  if (req.method === "POST" && u.pathname === "/heartbeat") {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk.toString("utf8");
+      if (body.length > 256 * 1024) req.destroy();
+    });
+    req.on("end", () => {
+      let payload = {};
+      try {
+        payload = body ? JSON.parse(body) : {};
+      } catch {
+        payload = {};
+      }
+      const source = payload.source || u.searchParams.get("source") || "external";
+      touchHeartbeat(source, "post");
+      return sendJson(res, 200, {
+        ok: true,
+        action: "heartbeat",
+        alias: cfg.alias,
+        alive: true,
+        heartbeat_count: heartbeatCount,
+        last_heartbeat_at: new Date(lastHeartbeatAt).toISOString(),
+        last_heartbeat_source: lastHeartbeatSource,
+        checked_at: new Date().toISOString(),
+      });
+    });
+    return;
+  }
+
   if (req.method === "GET" && u.pathname === "/status") {
     const refresh = u.searchParams.get("refresh") === "1";
     return sendJson(res, 200, collectStatus(refresh));
@@ -1144,6 +1302,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(cfg.controlPort, "0.0.0.0", () => {
+  touchHeartbeat("control-api-startup", "startup");
   process.stdout.write(`{"status":"ok","control_port":${cfg.controlPort}}\n`);
 });
 EOF2
@@ -1214,7 +1373,7 @@ EOF2
   if [ -n "$CONTROL_API_BIN" ] && [ -x "$CONTROL_API_SCRIPT" ]; then
     cat > /tmp/happycapy-control-api.conf <<EOF2
 [program:happycapy-control-api]
-command=/usr/bin/env HAPPYCAPY_ALIAS=${ALIAS} HAPPYCAPY_ACCESS_TOKEN=${ACCESS_TOKEN} HAPPYCAPY_SSH_PORT=${SSH_PORT} HAPPYCAPY_CONTROL_PORT=${CONTROL_PORT} HAPPYCAPY_RECOVER_SCRIPT=${RECOVER_SCRIPT_PATH} HAPPYCAPY_REGISTRY_WRITER=${writer} HAPPYCAPY_REGISTRY_URL_PATH=${REGISTRY_URL_PATH} HAPPYCAPY_CONTROL_API_URL_PATH=${CONTROL_API_URL_PATH} HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC=${EXPORT_PORT_TIMEOUT_SEC} ${CONTROL_API_BIN} ${CONTROL_API_SCRIPT}
+command=/usr/bin/env HAPPYCAPY_ALIAS=${ALIAS} HAPPYCAPY_ACCESS_TOKEN=${ACCESS_TOKEN} HAPPYCAPY_SSH_PORT=${SSH_PORT} HAPPYCAPY_CONTROL_PORT=${CONTROL_PORT} HAPPYCAPY_RECOVER_SCRIPT=${RECOVER_SCRIPT_PATH} HAPPYCAPY_REGISTRY_WRITER=${writer} HAPPYCAPY_REGISTRY_URL_PATH=${REGISTRY_URL_PATH} HAPPYCAPY_CONTROL_API_URL_PATH=${CONTROL_API_URL_PATH} HAPPYCAPY_HEARTBEAT_URL_PATH=${HEARTBEAT_URL_PATH} HAPPYCAPY_HEARTBEAT_INTERVAL_SEC=${HEARTBEAT_INTERVAL_SEC} HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE=${HEARTBEAT_EXTERNAL_KEEPALIVE} HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC=${EXPORT_PORT_TIMEOUT_SEC} ${CONTROL_API_BIN} ${CONTROL_API_SCRIPT}
 autostart=true
 autorestart=true
 startsecs=2
@@ -1306,6 +1465,9 @@ start_control_api_fallback() {
   HAPPYCAPY_REGISTRY_WRITER="$BOOT_WRITER" \
   HAPPYCAPY_REGISTRY_URL_PATH="$REGISTRY_URL_PATH" \
   HAPPYCAPY_CONTROL_API_URL_PATH="$CONTROL_API_URL_PATH" \
+  HAPPYCAPY_HEARTBEAT_URL_PATH="$HEARTBEAT_URL_PATH" \
+  HAPPYCAPY_HEARTBEAT_INTERVAL_SEC="$HEARTBEAT_INTERVAL_SEC" \
+  HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE="$HEARTBEAT_EXTERNAL_KEEPALIVE" \
   HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC="$EXPORT_PORT_TIMEOUT_SEC" \
   nohup "$CONTROL_API_BIN" "$CONTROL_API_SCRIPT" >/tmp/happycapy-control-api.log 2>/tmp/happycapy-control-api.err.log &
   printf '%s\n' "$!" > "$CONTROL_API_PID_FILE"
@@ -1423,6 +1585,7 @@ export HAPPYCAPY_REGISTRY_BASE="\${HAPPYCAPY_REGISTRY_BASE:-${REGISTRY_BASE}}"
 export HAPPYCAPY_REGISTRY_URL_PATH="\${HAPPYCAPY_REGISTRY_URL_PATH:-${REGISTRY_URL_PATH}}"
 export HAPPYCAPY_CONTROL_PORT="\${HAPPYCAPY_CONTROL_PORT:-${CONTROL_PORT}}"
 export HAPPYCAPY_CONTROL_API_URL_PATH="\${HAPPYCAPY_CONTROL_API_URL_PATH:-${CONTROL_API_URL_PATH}}"
+export HAPPYCAPY_HEARTBEAT_URL_PATH="\${HAPPYCAPY_HEARTBEAT_URL_PATH:-${HEARTBEAT_URL_PATH}}"
 export HAPPYCAPY_RECOVER_SCRIPT="\${HAPPYCAPY_RECOVER_SCRIPT:-${RECOVER_SCRIPT_PATH}}"
 export HAPPYCAPY_RECOVER_CHAIN=1
 
@@ -1476,9 +1639,32 @@ verify_services() {
 
 watchdog_loop() {
   local interval="$1"
+  local heartbeat_last_ts=0
+  local now_ts=0
+  local hb_ext_rc=0
   while true; do
     setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER"
     start_fallback_processes "$CHISEL_BIN"
+    now_ts="$(date +%s 2>/dev/null || echo 0)"
+    if [ "$HEARTBEAT_INTERVAL_SEC" -gt 0 ] && [ "$now_ts" -gt 0 ]; then
+      if [ "$heartbeat_last_ts" -eq 0 ] || [ $((now_ts - heartbeat_last_ts)) -ge "$HEARTBEAT_INTERVAL_SEC" ]; then
+        if ! control_api_heartbeat "watchdog-local"; then
+          heartbeat_log "heartbeat_fail: control_api_unreachable, restarting control api"
+          start_control_api_fallback || true
+          if control_api_heartbeat "watchdog-retry"; then
+            heartbeat_log "heartbeat_recovered"
+          else
+            heartbeat_log "heartbeat_still_fail"
+          fi
+        fi
+        control_api_external_heartbeat "watchdog-external"
+        hb_ext_rc=$?
+        if [ "$hb_ext_rc" -eq 1 ]; then
+          heartbeat_log "external_heartbeat_fail: control_api_url_unreachable"
+        fi
+        heartbeat_last_ts="$now_ts"
+      fi
+    fi
     if verify_services; then
       local server_now control_now
       server_now="$(query_preview_url_for_port 8080 || true)"
@@ -1643,6 +1829,7 @@ esac
 
 CHISEL_SERVER=""
 CONTROL_API_URL=""
+HEARTBEAT_URL=""
 REGISTRY_URL=""
 HEAL_OK=0
 HEAL_LAST_ERR=""
@@ -1685,6 +1872,12 @@ while [ "$HEAL_ROUND" -le "$HEAL_MAX_ROUNDS" ]; do
   if [ -z "$CONTROL_API_URL" ] && [ -f "$CONTROL_API_URL_PATH" ]; then
     CONTROL_API_URL="$(head -n1 "$CONTROL_API_URL_PATH" | tr -d '\r')"
   fi
+  if [ -z "$HEARTBEAT_URL" ] && [ -f "$HEARTBEAT_URL_PATH" ]; then
+    HEARTBEAT_URL="$(head -n1 "$HEARTBEAT_URL_PATH" | tr -d '\r')"
+  fi
+  if [ -z "$HEARTBEAT_URL" ] && [ -n "$CONTROL_API_URL" ]; then
+    HEARTBEAT_URL="${CONTROL_API_URL%/}/heartbeat"
+  fi
   if [ -z "$REGISTRY_URL" ]; then
     HEAL_LAST_STEP="read_registry_url"
     HEAL_LAST_ERR="registry_url_missing"
@@ -1703,15 +1896,18 @@ if [ "$HEAL_OK" -ne 1 ]; then
 fi
 
 if [ "$OUTPUT_MODE" = "short" ]; then
-  printf '{"status":"ok","chisel_server":"%s","recover_script":"%s","round":%s}\n' \
+  printf '{"status":"ok","chisel_server":"%s","control_api_url":"%s","heartbeat_url":"%s","recover_script":"%s","round":%s}\n' \
     "$(json_escape "${CHISEL_SERVER}")" \
+    "$(json_escape "${CONTROL_API_URL}")" \
+    "$(json_escape "${HEARTBEAT_URL}")" \
     "$(json_escape "${RECOVER_SCRIPT_PATH}")" \
     "$HEAL_ROUND"
 else
-  printf '{"status":"ok","alias":"%s","chisel_server":"%s","control_api_url":"%s","control_port":%s,"chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s,"control_api_ok":%s,"control_api_required":%s,"heal_round":%s}\n' \
+  printf '{"status":"ok","alias":"%s","chisel_server":"%s","control_api_url":"%s","heartbeat_url":"%s","control_port":%s,"chisel_auth":"%s","ssh_user":"%s","ssh_password":"%s","ssh_port":%s,"local_port":%s,"registry_file":"%s","registry_url":"%s","recover_script":"%s","bootstrap_cache":"%s","supervisor_managed":%s,"chisel_ok":%s,"sshd_ok":%s,"control_api_ok":%s,"control_api_required":%s,"heal_round":%s}\n' \
     "$(json_escape "$ALIAS")" \
     "$(json_escape "${CHISEL_SERVER}")" \
     "$(json_escape "${CONTROL_API_URL}")" \
+    "$(json_escape "${HEARTBEAT_URL}")" \
     "$CONTROL_PORT" \
     "$(json_escape "$CHISEL_AUTH")" \
     "$(json_escape "$SSH_USER")" \
