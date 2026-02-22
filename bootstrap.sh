@@ -1735,7 +1735,7 @@ else
   fi
 fi
 
-if [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [ -n "$RECOVER_EXISTING" ]; then
+if [ "$WATCHDOG_MODE" -ne 1 ] && [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [ -n "$RECOVER_EXISTING" ]; then
   set +e
   HAPPYCAPY_RECOVER_CHAIN=1 bash "$RECOVER_EXISTING"
   pre_recover_rc=$?
@@ -1926,11 +1926,9 @@ else
     "$HEAL_ROUND"
 fi
 
-if [ "$WATCHDOG_MODE" -ne 1 ] || [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" = "1" ]; then
+if [ "$WATCHDOG_MODE" -eq 1 ]; then
+  watchdog_loop "$WATCHDOG_INTERVAL_SEC"
+else
   # Do not block SSH readiness path: run restore in detached worker.
   start_autorestore_worker_detached || true
-fi
-
-if [ "$WATCHDOG_MODE" -eq 1 ] && [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ]; then
-  watchdog_loop "$WATCHDOG_INTERVAL_SEC"
 fi
