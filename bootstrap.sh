@@ -858,6 +858,37 @@ let heartbeatCount = 0;
 let lastHeartbeatAt = 0;
 let lastHeartbeatSource = "";
 let lastHeartbeatVia = "";
+const controlApiStartedAtMs = Date.now();
+
+function formatUptimeHuman(elapsedMs) {
+  const minuteMs = 60 * 1000;
+  const hourMinutes = 60;
+  const dayMinutes = 24 * hourMinutes;
+  const monthMinutes = 30 * dayMinutes;
+  const totalMinutes = Math.max(0, Math.floor(Number(elapsedMs || 0) / minuteMs));
+
+  if (totalMinutes >= monthMinutes) {
+    const months = Math.floor(totalMinutes / monthMinutes);
+    const remMinutes = totalMinutes % monthMinutes;
+    const days = Math.floor(remMinutes / dayMinutes);
+    return `${months}月${days}天`;
+  }
+
+  if (totalMinutes >= dayMinutes) {
+    const days = Math.floor(totalMinutes / dayMinutes);
+    const remMinutes = totalMinutes % dayMinutes;
+    const hours = Math.floor(remMinutes / hourMinutes);
+    return `${days}天${hours}小时`;
+  }
+
+  const hours = Math.floor(totalMinutes / hourMinutes);
+  const minutes = totalMinutes % hourMinutes;
+  return `${hours}小时${minutes}分钟`;
+}
+
+function controlApiUptimeHuman() {
+  return formatUptimeHuman(Date.now() - controlApiStartedAtMs);
+}
 
 function normalizeHeartbeatSource(raw, fallback = "unknown") {
   const src = String(raw || "").trim();
@@ -1149,6 +1180,7 @@ function collectStatus(refresh) {
     last_heartbeat_at: lastHeartbeatAt ? new Date(lastHeartbeatAt).toISOString() : "",
     last_heartbeat_source: lastHeartbeatSource,
     last_heartbeat_via: lastHeartbeatVia,
+    control_api_uptime: controlApiUptimeHuman(),
     ...state,
     checked_at: new Date().toISOString(),
   };
@@ -1167,6 +1199,7 @@ const server = http.createServer((req, res) => {
       heartbeat_count: heartbeatCount,
       last_heartbeat_at: new Date(lastHeartbeatAt).toISOString(),
       last_heartbeat_source: lastHeartbeatSource,
+      uptime: controlApiUptimeHuman(),
       checked_at: new Date().toISOString(),
     });
   }
@@ -1194,6 +1227,7 @@ const server = http.createServer((req, res) => {
         heartbeat_count: heartbeatCount,
         last_heartbeat_at: new Date(lastHeartbeatAt).toISOString(),
         last_heartbeat_source: lastHeartbeatSource,
+        uptime: controlApiUptimeHuman(),
         checked_at: new Date().toISOString(),
       });
     });
