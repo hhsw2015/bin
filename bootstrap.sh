@@ -890,6 +890,24 @@ function controlApiUptimeHuman() {
   return formatUptimeHuman(Date.now() - controlApiStartedAtMs);
 }
 
+function readMachineUptimeMs() {
+  try {
+    const raw = String(fs.readFileSync("/proc/uptime", "utf8") || "").trim();
+    const first = raw.split(/\s+/)[0] || "";
+    const sec = Number.parseFloat(first);
+    if (Number.isFinite(sec) && sec >= 0) {
+      return Math.floor(sec * 1000);
+    }
+  } catch {}
+  return null;
+}
+
+function machineUptimeHuman() {
+  const ms = readMachineUptimeMs();
+  if (ms === null) return "";
+  return formatUptimeHuman(ms);
+}
+
 function normalizeHeartbeatSource(raw, fallback = "unknown") {
   const src = String(raw || "").trim();
   if (!src) return fallback;
@@ -1180,6 +1198,7 @@ function collectStatus(refresh) {
     last_heartbeat_at: lastHeartbeatAt ? new Date(lastHeartbeatAt).toISOString() : "",
     last_heartbeat_source: lastHeartbeatSource,
     last_heartbeat_via: lastHeartbeatVia,
+    machine_uptime: machineUptimeHuman(),
     control_api_uptime: controlApiUptimeHuman(),
     ...state,
     checked_at: new Date().toISOString(),
@@ -1199,6 +1218,7 @@ const server = http.createServer((req, res) => {
       heartbeat_count: heartbeatCount,
       last_heartbeat_at: new Date(lastHeartbeatAt).toISOString(),
       last_heartbeat_source: lastHeartbeatSource,
+      machine_uptime: machineUptimeHuman(),
       uptime: controlApiUptimeHuman(),
       checked_at: new Date().toISOString(),
     });
@@ -1227,6 +1247,7 @@ const server = http.createServer((req, res) => {
         heartbeat_count: heartbeatCount,
         last_heartbeat_at: new Date(lastHeartbeatAt).toISOString(),
         last_heartbeat_source: lastHeartbeatSource,
+        machine_uptime: machineUptimeHuman(),
         uptime: controlApiUptimeHuman(),
         checked_at: new Date().toISOString(),
       });
