@@ -93,10 +93,10 @@ case "$WATCHDOG_INTERVAL_RAW" in
     WATCHDOG_INTERVAL_SEC="$WATCHDOG_INTERVAL_RAW"
     ;;
 esac
-HEARTBEAT_INTERVAL_RAW="${HAPPYCAPY_HEARTBEAT_INTERVAL_SEC:-180}"
+HEARTBEAT_INTERVAL_RAW="${HAPPYCAPY_HEARTBEAT_INTERVAL_SEC:-300}"
 case "$HEARTBEAT_INTERVAL_RAW" in
   ''|*[!0-9]*)
-    HEARTBEAT_INTERVAL_SEC=20
+    HEARTBEAT_INTERVAL_SEC=300
     ;;
   *)
     HEARTBEAT_INTERVAL_SEC="$HEARTBEAT_INTERVAL_RAW"
@@ -839,7 +839,7 @@ const cfg = {
   registryUrlPath: process.env.HAPPYCAPY_REGISTRY_URL_PATH || "",
   controlApiUrlPath: process.env.HAPPYCAPY_CONTROL_API_URL_PATH || "",
   heartbeatUrlPath: process.env.HAPPYCAPY_HEARTBEAT_URL_PATH || "",
-  heartbeatIntervalSec: Number(process.env.HAPPYCAPY_HEARTBEAT_INTERVAL_SEC || "180"),
+  heartbeatIntervalSec: Number(process.env.HAPPYCAPY_HEARTBEAT_INTERVAL_SEC || "300"),
   heartbeatExternalKeepalive: ["1", "true", "yes", "on"].includes(
     String(process.env.HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE || "1").toLowerCase()
   ),
@@ -1144,7 +1144,7 @@ function collectStatus(refresh) {
     last_recover_rc: lastRecoverRc,
     last_recover_output: (lastRecoverOutput || "").split(/\n/).slice(-8).join("\n"),
     heartbeat_count: heartbeatCount,
-    heartbeat_interval_sec: Math.max(5, Number(cfg.heartbeatIntervalSec || 180)),
+    heartbeat_interval_sec: Math.max(5, Number(cfg.heartbeatIntervalSec || 300)),
     heartbeat_external_keepalive: Boolean(cfg.heartbeatExternalKeepalive),
     last_heartbeat_at: lastHeartbeatAt ? new Date(lastHeartbeatAt).toISOString() : "",
     last_heartbeat_source: lastHeartbeatSource,
