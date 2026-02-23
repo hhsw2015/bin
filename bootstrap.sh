@@ -522,6 +522,78 @@ cleanup_keepalive_runtime_conflicts() {
   cleanup_keepalive_profile_lock_files
 }
 
+kill_pid_gracefully() {
+  local pid="$1"
+  case "$pid" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  if [ "$pid" -le 1 ] 2>/dev/null; then
+    return 0
+  fi
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  kill "$pid" >/dev/null 2>&1 || true
+  sleep 0.2
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill -9 "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
+prune_keepalive_browser_duplicates() {
+  local keep_pid="$1"
+  local line pid cmdline pruned
+  pruned=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    pid="$(printf '%s' "$line" | awk '{print $1}')"
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$pid" -eq "$keep_pid" ] && continue
+    cmdline="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"
+    case "$cmdline" in
+      *"--remote-debugging-port=${KEEPALIVE_CDP_PORT}"* )
+        case "$cmdline" in
+          *"--user-data-dir=${KEEPALIVE_PROFILE_DIR}"*|*"${KEEPALIVE_PROFILE_DIR}"*)
+            kill_pid_gracefully "$pid"
+            pruned=1
+            ;;
+        esac
+        ;;
+    esac
+  done < <(ps -eo pid=,args= 2>/dev/null || true)
+  if [ "$pruned" -eq 1 ]; then
+    keepalive_log "vnc_browser_prune_duplicates keep_pid=${keep_pid} profile=${KEEPALIVE_PROFILE_DIR}"
+  fi
+}
+
+cleanup_legacy_desktop_duplicates() {
+  local line pid cmdline pruned
+  pruned=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    pid="$(printf '%s' "$line" | awk '{print $1}')"
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    cmdline="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"
+    case "$cmdline" in
+      *x11vnc*rfbport*5991*|*x11vnc*rfbport*5921*|*x11vnc*rfbport*5900*)
+        kill_pid_gracefully "$pid"
+        pruned=1
+        ;;
+      *websockify*6191*|*websockify*6366*|*websockify*localhost:5991*|*websockify*localhost:5921*)
+        kill_pid_gracefully "$pid"
+        pruned=1
+        ;;
+    esac
+  done < <(ps -eo pid=,args= 2>/dev/null || true)
+  if [ "$pruned" -eq 1 ]; then
+    heartbeat_log "desktop_duplicate_pruned"
+  fi
+}
+
 start_vnc_browser_keepalive() {
   local browser_bin="$1"
   local vnc_url="$2"
@@ -794,6 +866,7 @@ vnc_browser_keepalive_tick() {
   fi
   desired_visible="$(keepalive_desired_visible)"
   if [ "$current_pid" -gt 0 ] && kill -0 "$current_pid" >/dev/null 2>&1; then
+    prune_keepalive_browser_duplicates "$current_pid"
     if [ -n "$current_url" ] && [ "$current_url" = "$vnc_url" ]; then
       if [ "$desired_visible" -eq 1 ] && keepalive_pid_is_headless "$current_pid"; then
         keepalive_log "vnc_browser_visibility_change pid=${current_pid} target=visible action=restart"
@@ -2349,6 +2422,7 @@ start_fallback_processes() {
   local sshd_bin
 
   sshd_bin="$(find_sshd_bin || true)"
+  cleanup_legacy_desktop_duplicates || true
 
   if [ "$SUPERVISOR_MANAGED" -eq 1 ]; then
     start_control_api_fallback || true
