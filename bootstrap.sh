@@ -1711,6 +1711,21 @@ function pidAlive(pid) {
   }
 }
 
+function pidCommandLine(pid) {
+  const n = Number(pid || 0);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const res = runBash(`tr '\\0' ' ' </proc/"$PID"/cmdline 2>/dev/null || ps -p "$PID" -o args= 2>/dev/null || true`, 4000, {
+    PID: String(n),
+  });
+  return String(res.out || "").trim();
+}
+
+function pidIsHeadless(pid) {
+  const cmd = pidCommandLine(pid).toLowerCase();
+  if (!cmd) return false;
+  return /(^|\\s)--headless(=new)?(\\s|$)/.test(cmd);
+}
+
 function keepaliveStatus() {
   const mode = String(cfg.keepaliveMode || "heartbeat").trim() || "heartbeat";
   const intervalSec = Math.max(30, Number(cfg.keepaliveIntervalSec || 300));
@@ -1719,17 +1734,24 @@ function keepaliveStatus() {
   const state = parseKeyValueFile(cfg.keepaliveStatePath || "");
   const browserVisibleDesired = readKeepaliveVisibleDesired();
   const browserVisibleRuntime = parseBool(state.browser_visible, browserVisibleDesired);
+  const browserHeadless = running ? pidIsHeadless(pid) : false;
+  const browserVisibleActual = running ? !browserHeadless : false;
   const refreshCount = Number.parseInt(String(state.refresh_count || "0"), 10);
   const forceRefreshEnabled =
     String(state.force_refresh_enabled || (cfg.keepaliveForceRefresh ? "1" : "0")).toLowerCase() === "1";
+  const lastTickAt = String(state.last_tick_at || "").trim();
+  const lastTickMs = Date.parse(lastTickAt || "");
+  const tickAgeMs = Number.isFinite(lastTickMs) ? (Date.now() - lastTickMs) : Number.POSITIVE_INFINITY;
   const lastRefreshAt = String(state.last_refresh_at || "").trim();
   const lastRefreshMs = Date.parse(lastRefreshAt || "");
   const refreshAgeMs = Number.isFinite(lastRefreshMs) ? (Date.now() - lastRefreshMs) : Number.POSITIVE_INFINITY;
+  const activeWindowMs = Math.max(60, intervalSec * 2) * 1000;
+  const recentTick = Number.isFinite(lastTickMs) && tickAgeMs <= activeWindowMs;
+  const recentRefresh = Number.isFinite(lastRefreshMs) && refreshAgeMs <= activeWindowMs;
   const refreshing =
     mode === "vnc-browser" &&
     running &&
-    forceRefreshEnabled &&
-    refreshAgeMs <= Math.max(60, intervalSec * 2) * 1000;
+    (recentTick || (forceRefreshEnabled && recentRefresh));
   const currentPage =
     decodeB64(state.current_url_b64 || "") ||
     String(state.current_url || "").trim() ||
@@ -1737,8 +1759,10 @@ function keepaliveStatus() {
   return {
     mode,
     interval_sec: intervalSec,
-    browser_visible: browserVisibleRuntime,
+    browser_visible: browserVisibleActual,
     browser_visible_desired: browserVisibleDesired,
+    browser_visible_runtime: browserVisibleRuntime,
+    browser_headless: browserHeadless,
     display: String(cfg.keepaliveDisplay || ":1"),
     force_refresh_enabled: forceRefreshEnabled,
     refreshing,
@@ -1746,6 +1770,7 @@ function keepaliveStatus() {
     running,
     url: readText(cfg.keepaliveUrlPath),
     current_page: currentPage,
+    last_tick_at: lastTickAt,
     last_refresh_at: lastRefreshAt,
     last_refresh_action: String(state.last_refresh_action || "").trim(),
     last_refresh_ok: String(state.last_refresh_ok || "").trim() === "1",
@@ -2016,17 +2041,6 @@ function collectStatus(refresh) {
     last_heartbeat_source: lastHeartbeatSource,
     last_heartbeat_via: lastHeartbeatVia,
     keepalive,
-    keepalive_mode: keepalive.mode,
-    keepalive_interval_sec: keepalive.interval_sec,
-    keepalive_pid: keepalive.pid,
-    keepalive_running: keepalive.running,
-    keepalive_url: keepalive.url,
-    keepalive_browser_visible: keepalive.browser_visible,
-    keepalive_browser_visible_desired: keepalive.browser_visible_desired,
-    keepalive_refreshing: keepalive.refreshing,
-    keepalive_current_page: keepalive.current_page,
-    keepalive_last_refresh_at: keepalive.last_refresh_at,
-    keepalive_refresh_count: keepalive.refresh_count,
     machine_uptime: machineUptimeHuman(),
     control_api_uptime: controlApiUptimeHuman(),
     ...state,
