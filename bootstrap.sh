@@ -63,6 +63,10 @@ CONTROL_API_SCRIPT="${PERSIST_DIR}/happycapy-control-api.js"
 CONTROL_API_PID_FILE="${PERSIST_DIR}/happycapy-control-api.pid"
 CONTROL_API_URL_PATH="${HAPPYCAPY_CONTROL_API_URL_PATH:-${PERSIST_DIR}/control_api_url.txt}"
 HEARTBEAT_URL_PATH="${HAPPYCAPY_HEARTBEAT_URL_PATH:-${PERSIST_DIR}/heartbeat_url.txt}"
+KEEPALIVE_PID_FILE="${HAPPYCAPY_KEEPALIVE_PID_FILE:-${PERSIST_DIR}/vnc-keeper-browser.pid}"
+KEEPALIVE_URL_PATH="${HAPPYCAPY_KEEPALIVE_URL_PATH:-${PERSIST_DIR}/vnc-keeper-url.txt}"
+KEEPALIVE_BROWSER_LOG="${HAPPYCAPY_KEEPALIVE_BROWSER_LOG:-/tmp/happycapy-vnc-browser.log}"
+KEEPALIVE_LOG_PATH="${HAPPYCAPY_KEEPALIVE_LOG_PATH:-/tmp/happycapy-vnc-keepalive.log}"
 AUTORESTORE_ENV_FILE="${HAPPYCAPY_AUTORESTORE_ENV_FILE:-${PERSIST_DIR}/autorestore.env}"
 EXTERNAL_RECOVER_URL="${HAPPYCAPY_EXTERNAL_RECOVER_URL:-}"
 EXTERNAL_RECOVER_STATE_FILE="${PERSIST_DIR}/external-recover.state"
@@ -123,6 +127,43 @@ HEARTBEAT_EXTERNAL_KEEPALIVE=0
 case "$HEARTBEAT_EXTERNAL_KEEPALIVE_RAW" in
   1|true|yes|on) HEARTBEAT_EXTERNAL_KEEPALIVE=1 ;;
 esac
+KEEPALIVE_MODE_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_MODE:-heartbeat}" | tr '[:upper:]' '[:lower:]')"
+KEEPALIVE_MODE="heartbeat"
+case "$KEEPALIVE_MODE_RAW" in
+  vnc-browser|vnc_browser|browser|vncbrowser) KEEPALIVE_MODE="vnc-browser" ;;
+  *) KEEPALIVE_MODE="heartbeat" ;;
+esac
+KEEPALIVE_INTERVAL_RAW="${HAPPYCAPY_KEEPALIVE_INTERVAL_SEC:-${HEARTBEAT_INTERVAL_SEC}}"
+case "$KEEPALIVE_INTERVAL_RAW" in
+  ''|*[!0-9]*)
+    KEEPALIVE_INTERVAL_SEC="$HEARTBEAT_INTERVAL_SEC"
+    ;;
+  *)
+    KEEPALIVE_INTERVAL_SEC="$KEEPALIVE_INTERVAL_RAW"
+    ;;
+esac
+if [ "$KEEPALIVE_INTERVAL_SEC" -lt 30 ] 2>/dev/null; then
+  KEEPALIVE_INTERVAL_SEC=30
+fi
+KEEPALIVE_BROWSER_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_BROWSER:-chromium}" | tr '[:upper:]' '[:lower:]')"
+KEEPALIVE_BROWSER="chromium"
+case "$KEEPALIVE_BROWSER_RAW" in
+  chromium|chromium-browser|chrome|google-chrome|google-chrome-stable) KEEPALIVE_BROWSER="chromium" ;;
+  firefox) KEEPALIVE_BROWSER="firefox" ;;
+esac
+KEEPALIVE_CDP_PORT_RAW="${HAPPYCAPY_KEEPALIVE_CDP_PORT:-19222}"
+case "$KEEPALIVE_CDP_PORT_RAW" in
+  ''|*[!0-9]*)
+    KEEPALIVE_CDP_PORT=19222
+    ;;
+  *)
+    KEEPALIVE_CDP_PORT="$KEEPALIVE_CDP_PORT_RAW"
+    ;;
+esac
+if [ "$KEEPALIVE_CDP_PORT" -lt 1024 ] 2>/dev/null || [ "$KEEPALIVE_CDP_PORT" -gt 65535 ] 2>/dev/null; then
+  KEEPALIVE_CDP_PORT=19222
+fi
+KEEPALIVE_PROFILE_DIR="${HAPPYCAPY_KEEPALIVE_PROFILE_DIR:-${PERSIST_DIR}/apps/keepalive/browser/profile}"
 EXPORT_PORT_TIMEOUT_RAW="${HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC:-8}"
 case "$EXPORT_PORT_TIMEOUT_RAW" in
   ''|*[!0-9.]*)
@@ -240,6 +281,11 @@ control_api_external_heartbeat() {
   return 0
 }
 
+keepalive_log() {
+  local msg="$1"
+  printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >> "$KEEPALIVE_LOG_PATH" 2>/dev/null || true
+}
+
 find_sshd_bin() {
   if command -v sshd >/dev/null 2>&1; then
     command -v sshd
@@ -274,6 +320,87 @@ find_chisel_bin() {
     return 0
   fi
   return 1
+}
+
+find_browser_bin() {
+  local preferred="$KEEPALIVE_BROWSER"
+  local c
+  for c in "$preferred" chromium chromium-browser google-chrome google-chrome-stable firefox; do
+    [ -n "$c" ] || continue
+    if command -v "$c" >/dev/null 2>&1; then
+      command -v "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+stop_keepalive_browser() {
+  local pid
+  pid=0
+  if [ -f "$KEEPALIVE_PID_FILE" ]; then
+    pid="$(cat "$KEEPALIVE_PID_FILE" 2>/dev/null | tr -dc '0-9')"
+  fi
+  [ -z "$pid" ] && pid=0
+  if [ "$pid" -gt 0 ] && kill -0 "$pid" >/dev/null 2>&1; then
+    kill "$pid" >/dev/null 2>&1 || true
+    sleep 0.2
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      kill -9 "$pid" >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -f "$KEEPALIVE_PID_FILE" >/dev/null 2>&1 || true
+}
+
+start_vnc_browser_keepalive() {
+  local browser_bin="$1"
+  local vnc_url="$2"
+  local pid browser_name
+  browser_name="$(basename "$browser_bin")"
+  mkdir -p "$(dirname "$KEEPALIVE_PID_FILE")" "$(dirname "$KEEPALIVE_URL_PATH")" "$KEEPALIVE_PROFILE_DIR"
+  if [ "$browser_name" = "firefox" ]; then
+    nohup "$browser_bin" --headless --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+  else
+    nohup "$browser_bin" \
+      --headless=new \
+      --disable-gpu \
+      --disable-dev-shm-usage \
+      --disable-background-networking \
+      --disable-renderer-backgrounding \
+      --no-first-run \
+      --no-default-browser-check \
+      --window-size=1366,768 \
+      --remote-debugging-port="$KEEPALIVE_CDP_PORT" \
+      --user-data-dir="$KEEPALIVE_PROFILE_DIR" \
+      "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+  fi
+  pid="$!"
+  printf '%s\n' "$pid" > "$KEEPALIVE_PID_FILE"
+  printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
+  sleep 0.3
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} url=${vnc_url}"
+    return 0
+  fi
+  keepalive_log "vnc_browser_fail browser=${browser_name} url=${vnc_url}"
+  return 1
+}
+
+vnc_browser_keepalive_tick() {
+  local vnc_base vnc_url browser_bin
+  vnc_base="$(query_preview_url_for_port 6080 || true)"
+  if [ -z "$vnc_base" ]; then
+    keepalive_log "vnc_browser_skip reason=no_vnc_url"
+    return 1
+  fi
+  vnc_url="${vnc_base%/}/vnc.html?autoconnect=1&reconnect=1&resize=remote&path=websockify"
+  browser_bin="$(find_browser_bin || true)"
+  if [ -z "$browser_bin" ]; then
+    keepalive_log "vnc_browser_skip reason=no_browser_bin"
+    return 1
+  fi
+  stop_keepalive_browser
+  start_vnc_browser_keepalive "$browser_bin" "$vnc_url"
 }
 
 with_retry() {
@@ -400,6 +527,14 @@ load_autorestore_preferences() {
         ;;
     esac
   done < "$AUTORESTORE_ENV_FILE"
+  # Extension-only behavior: vnc-browser keepalive requires desktop + browser.
+  # Keep default behavior unchanged unless keepalive mode is explicitly enabled.
+  if [ "$KEEPALIVE_MODE" = "vnc-browser" ]; then
+    AUTORESTORE_DESKTOP=1
+    if [ -z "$AUTORESTORE_BROWSER" ]; then
+      AUTORESTORE_BROWSER="$KEEPALIVE_BROWSER"
+    fi
+  fi
 }
 
 ensure_autorestore_docker() {
@@ -843,6 +978,12 @@ const cfg = {
   heartbeatExternalKeepalive: ["1", "true", "yes", "on"].includes(
     String(process.env.HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE || "1").toLowerCase()
   ),
+  keepaliveMode: String(process.env.HAPPYCAPY_KEEPALIVE_MODE || "heartbeat"),
+  keepaliveIntervalSec: Number(process.env.HAPPYCAPY_KEEPALIVE_INTERVAL_SEC || "300"),
+  keepalivePidFile: process.env.HAPPYCAPY_KEEPALIVE_PID_FILE || "",
+  keepaliveUrlPath: process.env.HAPPYCAPY_KEEPALIVE_URL_PATH || "",
+  keepaliveLogPath: process.env.HAPPYCAPY_KEEPALIVE_LOG_PATH || "",
+  keepaliveBrowserLogPath: process.env.HAPPYCAPY_KEEPALIVE_BROWSER_LOG || "",
   exportTimeout: Number(process.env.HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC || "8"),
   hardRestartSshd: ["1", "true", "yes", "on"].includes(
     String(process.env.HAPPYCAPY_HARD_RECOVER_RESTART_SSHD || "0").toLowerCase()
@@ -939,6 +1080,41 @@ function readText(path) {
   } catch {
     return "";
   }
+}
+
+function readPid(path) {
+  const raw = readText(path);
+  const n = Number.parseInt(raw || "0", 10);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n;
+}
+
+function pidAlive(pid) {
+  const n = Number(pid || 0);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function keepaliveStatus() {
+  const mode = String(cfg.keepaliveMode || "heartbeat").trim() || "heartbeat";
+  const intervalSec = Math.max(30, Number(cfg.keepaliveIntervalSec || 300));
+  const pid = readPid(cfg.keepalivePidFile);
+  const running = pidAlive(pid);
+  return {
+    mode,
+    interval_sec: intervalSec,
+    pid,
+    running,
+    url: readText(cfg.keepaliveUrlPath),
+    pid_file: cfg.keepalivePidFile || "",
+    log_path: cfg.keepaliveLogPath || "",
+    browser_log_path: cfg.keepaliveBrowserLogPath || "",
+  };
 }
 
 function exportPortUrl(port) {
@@ -1147,6 +1323,7 @@ function sendJson(res, code, obj) {
 
 function collectStatus(refresh) {
   const state = runtimeState();
+  const keepalive = keepaliveStatus();
   let chiselServer = "";
   let controlApiUrl = readText(cfg.controlApiUrlPath);
   let heartbeatUrl = readText(cfg.heartbeatUrlPath);
@@ -1198,6 +1375,12 @@ function collectStatus(refresh) {
     last_heartbeat_at: lastHeartbeatAt ? new Date(lastHeartbeatAt).toISOString() : "",
     last_heartbeat_source: lastHeartbeatSource,
     last_heartbeat_via: lastHeartbeatVia,
+    keepalive,
+    keepalive_mode: keepalive.mode,
+    keepalive_interval_sec: keepalive.interval_sec,
+    keepalive_pid: keepalive.pid,
+    keepalive_running: keepalive.running,
+    keepalive_url: keepalive.url,
     machine_uptime: machineUptimeHuman(),
     control_api_uptime: controlApiUptimeHuman(),
     ...state,
@@ -1428,7 +1611,7 @@ EOF2
   if [ -n "$CONTROL_API_BIN" ] && [ -x "$CONTROL_API_SCRIPT" ]; then
     cat > /tmp/happycapy-control-api.conf <<EOF2
 [program:happycapy-control-api]
-command=/usr/bin/env HAPPYCAPY_ALIAS=${ALIAS} HAPPYCAPY_ACCESS_TOKEN=${ACCESS_TOKEN} HAPPYCAPY_SSH_PORT=${SSH_PORT} HAPPYCAPY_CONTROL_PORT=${CONTROL_PORT} HAPPYCAPY_RECOVER_SCRIPT=${RECOVER_SCRIPT_PATH} HAPPYCAPY_REGISTRY_WRITER=${writer} HAPPYCAPY_REGISTRY_URL_PATH=${REGISTRY_URL_PATH} HAPPYCAPY_CONTROL_API_URL_PATH=${CONTROL_API_URL_PATH} HAPPYCAPY_HEARTBEAT_URL_PATH=${HEARTBEAT_URL_PATH} HAPPYCAPY_HEARTBEAT_INTERVAL_SEC=${HEARTBEAT_INTERVAL_SEC} HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE=${HEARTBEAT_EXTERNAL_KEEPALIVE} HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC=${EXPORT_PORT_TIMEOUT_SEC} ${CONTROL_API_BIN} ${CONTROL_API_SCRIPT}
+command=/usr/bin/env HAPPYCAPY_ALIAS=${ALIAS} HAPPYCAPY_ACCESS_TOKEN=${ACCESS_TOKEN} HAPPYCAPY_SSH_PORT=${SSH_PORT} HAPPYCAPY_CONTROL_PORT=${CONTROL_PORT} HAPPYCAPY_RECOVER_SCRIPT=${RECOVER_SCRIPT_PATH} HAPPYCAPY_REGISTRY_WRITER=${writer} HAPPYCAPY_REGISTRY_URL_PATH=${REGISTRY_URL_PATH} HAPPYCAPY_CONTROL_API_URL_PATH=${CONTROL_API_URL_PATH} HAPPYCAPY_HEARTBEAT_URL_PATH=${HEARTBEAT_URL_PATH} HAPPYCAPY_HEARTBEAT_INTERVAL_SEC=${HEARTBEAT_INTERVAL_SEC} HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE=${HEARTBEAT_EXTERNAL_KEEPALIVE} HAPPYCAPY_KEEPALIVE_MODE=${KEEPALIVE_MODE} HAPPYCAPY_KEEPALIVE_INTERVAL_SEC=${KEEPALIVE_INTERVAL_SEC} HAPPYCAPY_KEEPALIVE_PID_FILE=${KEEPALIVE_PID_FILE} HAPPYCAPY_KEEPALIVE_URL_PATH=${KEEPALIVE_URL_PATH} HAPPYCAPY_KEEPALIVE_LOG_PATH=${KEEPALIVE_LOG_PATH} HAPPYCAPY_KEEPALIVE_BROWSER_LOG=${KEEPALIVE_BROWSER_LOG} HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC=${EXPORT_PORT_TIMEOUT_SEC} ${CONTROL_API_BIN} ${CONTROL_API_SCRIPT}
 autostart=true
 autorestart=true
 startsecs=2
@@ -1523,6 +1706,12 @@ start_control_api_fallback() {
   HAPPYCAPY_HEARTBEAT_URL_PATH="$HEARTBEAT_URL_PATH" \
   HAPPYCAPY_HEARTBEAT_INTERVAL_SEC="$HEARTBEAT_INTERVAL_SEC" \
   HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE="$HEARTBEAT_EXTERNAL_KEEPALIVE" \
+  HAPPYCAPY_KEEPALIVE_MODE="$KEEPALIVE_MODE" \
+  HAPPYCAPY_KEEPALIVE_INTERVAL_SEC="$KEEPALIVE_INTERVAL_SEC" \
+  HAPPYCAPY_KEEPALIVE_PID_FILE="$KEEPALIVE_PID_FILE" \
+  HAPPYCAPY_KEEPALIVE_URL_PATH="$KEEPALIVE_URL_PATH" \
+  HAPPYCAPY_KEEPALIVE_LOG_PATH="$KEEPALIVE_LOG_PATH" \
+  HAPPYCAPY_KEEPALIVE_BROWSER_LOG="$KEEPALIVE_BROWSER_LOG" \
   HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC="$EXPORT_PORT_TIMEOUT_SEC" \
   nohup "$CONTROL_API_BIN" "$CONTROL_API_SCRIPT" >/tmp/happycapy-control-api.log 2>/tmp/happycapy-control-api.err.log &
   printf '%s\n' "$!" > "$CONTROL_API_PID_FILE"
@@ -1641,6 +1830,15 @@ export HAPPYCAPY_REGISTRY_URL_PATH="\${HAPPYCAPY_REGISTRY_URL_PATH:-${REGISTRY_U
 export HAPPYCAPY_CONTROL_PORT="\${HAPPYCAPY_CONTROL_PORT:-${CONTROL_PORT}}"
 export HAPPYCAPY_CONTROL_API_URL_PATH="\${HAPPYCAPY_CONTROL_API_URL_PATH:-${CONTROL_API_URL_PATH}}"
 export HAPPYCAPY_HEARTBEAT_URL_PATH="\${HAPPYCAPY_HEARTBEAT_URL_PATH:-${HEARTBEAT_URL_PATH}}"
+export HAPPYCAPY_KEEPALIVE_MODE="\${HAPPYCAPY_KEEPALIVE_MODE:-${KEEPALIVE_MODE}}"
+export HAPPYCAPY_KEEPALIVE_INTERVAL_SEC="\${HAPPYCAPY_KEEPALIVE_INTERVAL_SEC:-${KEEPALIVE_INTERVAL_SEC}}"
+export HAPPYCAPY_KEEPALIVE_BROWSER="\${HAPPYCAPY_KEEPALIVE_BROWSER:-${KEEPALIVE_BROWSER}}"
+export HAPPYCAPY_KEEPALIVE_CDP_PORT="\${HAPPYCAPY_KEEPALIVE_CDP_PORT:-${KEEPALIVE_CDP_PORT}}"
+export HAPPYCAPY_KEEPALIVE_PROFILE_DIR="\${HAPPYCAPY_KEEPALIVE_PROFILE_DIR:-${KEEPALIVE_PROFILE_DIR}}"
+export HAPPYCAPY_KEEPALIVE_PID_FILE="\${HAPPYCAPY_KEEPALIVE_PID_FILE:-${KEEPALIVE_PID_FILE}}"
+export HAPPYCAPY_KEEPALIVE_URL_PATH="\${HAPPYCAPY_KEEPALIVE_URL_PATH:-${KEEPALIVE_URL_PATH}}"
+export HAPPYCAPY_KEEPALIVE_LOG_PATH="\${HAPPYCAPY_KEEPALIVE_LOG_PATH:-${KEEPALIVE_LOG_PATH}}"
+export HAPPYCAPY_KEEPALIVE_BROWSER_LOG="\${HAPPYCAPY_KEEPALIVE_BROWSER_LOG:-${KEEPALIVE_BROWSER_LOG}}"
 export HAPPYCAPY_RECOVER_SCRIPT="\${HAPPYCAPY_RECOVER_SCRIPT:-${RECOVER_SCRIPT_PATH}}"
 export HAPPYCAPY_RECOVER_CHAIN=1
 
@@ -1695,8 +1893,12 @@ verify_services() {
 watchdog_loop() {
   local interval="$1"
   local heartbeat_last_ts=0
+  local keepalive_last_ts=0
   local now_ts=0
   local hb_ext_rc=0
+  if [ "$KEEPALIVE_MODE" != "vnc-browser" ]; then
+    stop_keepalive_browser || true
+  fi
   while true; do
     setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER"
     start_fallback_processes "$CHISEL_BIN"
@@ -1730,6 +1932,12 @@ watchdog_loop() {
       # Keep workspace restore behind core connectivity:
       # SSH/chisel/control must be healthy first, then run restore tasks.
       run_workspace_autorestore
+      if [ "$KEEPALIVE_MODE" = "vnc-browser" ] && [ "$KEEPALIVE_INTERVAL_SEC" -gt 0 ] && [ "$now_ts" -gt 0 ]; then
+        if [ "$keepalive_last_ts" -eq 0 ] || [ $((now_ts - keepalive_last_ts)) -ge "$KEEPALIVE_INTERVAL_SEC" ]; then
+          vnc_browser_keepalive_tick || true
+          keepalive_last_ts="$now_ts"
+        fi
+      fi
     fi
     sleep "$interval"
   done
