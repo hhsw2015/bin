@@ -361,6 +361,58 @@ stop_keepalive_browser() {
   rm -f "$KEEPALIVE_PID_FILE" >/dev/null 2>&1 || true
 }
 
+kill_keepalive_profile_processes() {
+  local line pid cmdline killed
+  killed=0
+  [ -n "$KEEPALIVE_PROFILE_DIR" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    pid="$(printf '%s' "$line" | awk '{print $1}')"
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    cmdline="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"
+    case "$cmdline" in
+      *"--user-data-dir=${KEEPALIVE_PROFILE_DIR}"*|*"${KEEPALIVE_PROFILE_DIR}"*)
+        kill "$pid" >/dev/null 2>&1 || true
+        killed=1
+        ;;
+    esac
+  done < <(ps -eo pid=,args= 2>/dev/null || true)
+
+  if [ "$killed" -eq 1 ]; then
+    sleep 0.5
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      pid="$(printf '%s' "$line" | awk '{print $1}')"
+      case "$pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      cmdline="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"
+      case "$cmdline" in
+        *"--user-data-dir=${KEEPALIVE_PROFILE_DIR}"*|*"${KEEPALIVE_PROFILE_DIR}"*)
+          if kill -0 "$pid" >/dev/null 2>&1; then
+            kill -9 "$pid" >/dev/null 2>&1 || true
+          fi
+          ;;
+      esac
+    done < <(ps -eo pid=,args= 2>/dev/null || true)
+  fi
+}
+
+cleanup_keepalive_profile_lock_files() {
+  [ -n "$KEEPALIVE_PROFILE_DIR" ] || return 0
+  rm -f \
+    "$KEEPALIVE_PROFILE_DIR/SingletonLock" \
+    "$KEEPALIVE_PROFILE_DIR/SingletonSocket" \
+    "$KEEPALIVE_PROFILE_DIR/SingletonCookie" >/dev/null 2>&1 || true
+}
+
+cleanup_keepalive_runtime_conflicts() {
+  kill_keepalive_profile_processes
+  cleanup_keepalive_profile_lock_files
+}
+
 start_vnc_browser_keepalive() {
   local browser_bin="$1"
   local vnc_url="$2"
@@ -369,6 +421,7 @@ start_vnc_browser_keepalive() {
   visible_try_ok=0
   mkdir -p "$(dirname "$KEEPALIVE_PID_FILE")" "$(dirname "$KEEPALIVE_URL_PATH")" "$KEEPALIVE_PROFILE_DIR"
   if [ "$KEEPALIVE_BROWSER_VISIBLE" -eq 1 ]; then
+    cleanup_keepalive_runtime_conflicts
     if [ "$browser_name" = "firefox" ]; then
       nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
     else
@@ -392,6 +445,32 @@ start_vnc_browser_keepalive() {
       printf '%s\n' "$pid" > "$KEEPALIVE_PID_FILE"
       printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
       keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} mode=visible display=${KEEPALIVE_DISPLAY} url=${vnc_url}"
+      return 0
+    fi
+    cleanup_keepalive_runtime_conflicts
+    if [ "$browser_name" = "firefox" ]; then
+      nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+    else
+      nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" \
+        --disable-gpu \
+        --disable-dev-shm-usage \
+        --disable-background-networking \
+        --disable-renderer-backgrounding \
+        --no-first-run \
+        --no-default-browser-check \
+        --window-size=1366,768 \
+        --remote-debugging-port="$KEEPALIVE_CDP_PORT" \
+        --user-data-dir="$KEEPALIVE_PROFILE_DIR" \
+        --new-window \
+        "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+    fi
+    pid="$!"
+    sleep 0.5
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      visible_try_ok=1
+      printf '%s\n' "$pid" > "$KEEPALIVE_PID_FILE"
+      printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
+      keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} mode=visible-retry display=${KEEPALIVE_DISPLAY} url=${vnc_url}"
       return 0
     fi
     keepalive_log "vnc_browser_visible_fail browser=${browser_name} display=${KEEPALIVE_DISPLAY} url=${vnc_url}"
@@ -2053,28 +2132,92 @@ watchdog_loop() {
   done
 }
 
+bootstrap_cmdline_like() {
+  local cmdline="$1"
+  case "$cmdline" in
+    *"/.happycapy/bootstrap.sh"*|*"/tmp/hc-remote-bootstrap.sh"*|*" bootstrap.sh"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+bootstrap_lock_owner_alive() {
+  local owner_pid="$1"
+  local cmdline
+  case "$owner_pid" in
+    ''|*[!0-9]*)
+      return 1
+      ;;
+  esac
+  if [ "$owner_pid" -le 1 ] 2>/dev/null; then
+    return 1
+  fi
+  if ! kill -0 "$owner_pid" >/dev/null 2>&1; then
+    return 1
+  fi
+  cmdline="$(ps -p "$owner_pid" -o args= 2>/dev/null || true)"
+  [ -n "$cmdline" ] || return 1
+  bootstrap_cmdline_like "$cmdline"
+}
+
+converge_bootstrap_singleton() {
+  local line pid cmdline killed_pids
+  killed_pids=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    pid="$(printf '%s' "$line" | awk '{print $1}')"
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    [ "$pid" -eq "$$" ] && continue
+    cmdline="$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+//')"
+    bootstrap_cmdline_like "$cmdline" || continue
+    case "$cmdline" in
+      *"--autorestore-only"*) continue ;;
+    esac
+    kill "$pid" >/dev/null 2>&1 || true
+    killed_pids="${killed_pids} ${pid}"
+  done < <(ps -eo pid=,args= 2>/dev/null || true)
+
+  if [ -n "$killed_pids" ]; then
+    sleep 0.4
+    for pid in $killed_pids; do
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        kill -9 "$pid" >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+}
+
 acquire_bootstrap_lock() {
   mkdir -p "$PERSIST_DIR"
-  local tries=0
-  local max_tries=12
-  while true; do
-    if mkdir "$BOOTSTRAP_LOCK_DIR" 2>/dev/null; then
-      printf '%s\n' "$$" > "$BOOTSTRAP_LOCK_PID_FILE"
-      return 0
-    fi
-    local owner_pid
-    owner_pid="$(cat "$BOOTSTRAP_LOCK_PID_FILE" 2>/dev/null || true)"
-    if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
-      tries=$((tries + 1))
-      if [ "$tries" -ge "$max_tries" ]; then
-        return 1
-      fi
-      sleep 1
-      continue
-    fi
-    rm -rf "$BOOTSTRAP_LOCK_DIR" >/dev/null 2>&1 || true
-    sleep 0.2
-  done
+  local owner_pid
+  if mkdir "$BOOTSTRAP_LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$BOOTSTRAP_LOCK_PID_FILE"
+    return 0
+  fi
+
+  owner_pid="$(cat "$BOOTSTRAP_LOCK_PID_FILE" 2>/dev/null | tr -dc '0-9' || true)"
+  if bootstrap_lock_owner_alive "$owner_pid"; then
+    return 1
+  fi
+
+  rm -rf "$BOOTSTRAP_LOCK_DIR" >/dev/null 2>&1 || true
+  sleep 0.2
+  if mkdir "$BOOTSTRAP_LOCK_DIR" 2>/dev/null; then
+    printf '%s\n' "$$" > "$BOOTSTRAP_LOCK_PID_FILE"
+    return 0
+  fi
+
+  owner_pid="$(cat "$BOOTSTRAP_LOCK_PID_FILE" 2>/dev/null | tr -dc '0-9' || true)"
+  if bootstrap_lock_owner_alive "$owner_pid"; then
+    return 1
+  fi
+  rm -rf "$BOOTSTRAP_LOCK_DIR" >/dev/null 2>&1 || true
+  return 1
 }
 
 release_bootstrap_lock() {
@@ -2131,6 +2274,7 @@ if ! acquire_bootstrap_lock; then
   exit 1
 fi
 trap 'release_bootstrap_lock' EXIT INT TERM
+converge_bootstrap_singleton || true
 
 RECOVER_SCRIPT="$(install_recover_script || true)"
 if [ -z "$RECOVER_SCRIPT" ] || [ ! -x "$RECOVER_SCRIPT" ]; then
