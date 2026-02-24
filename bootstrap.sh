@@ -285,6 +285,7 @@ esac
 if [ "$KEEPALIVE_CDP_PORT" -lt 1024 ] 2>/dev/null || [ "$KEEPALIVE_CDP_PORT" -gt 65535 ] 2>/dev/null; then
   KEEPALIVE_CDP_PORT=19222
 fi
+DESKTOP_RESOLUTION="${HAPPYCAPY_DESKTOP_RESOLUTION:-1366x768x24}"
 KEEPALIVE_PROFILE_DIR="${HAPPYCAPY_KEEPALIVE_PROFILE_DIR:-${PERSIST_DIR}/apps/keepalive/browser/profile}"
 KEEPALIVE_REFRESH_MODE_PATH="${HAPPYCAPY_KEEPALIVE_REFRESH_MODE_PATH:-${PERSIST_DIR}/vnc-keeper-refresh-mode.txt}"
 mkdir -p "$(dirname "$KEEPALIVE_VISIBLE_PATH")" >/dev/null 2>&1 || true
@@ -676,11 +677,34 @@ keepalive_pick_window_for_pid() {
 ensure_keepalive_window_workspace() {
   local pid="$1"
   local target="$KEEPALIVE_WORKSPACE"
-  local win_id current_ws desktop_count
+  local win_id current_ws desktop_count moved_any
   if [ "$target" -lt 0 ] 2>/dev/null; then
     return 0
   fi
   if ! command -v xdotool >/dev/null 2>&1 || ! command -v wmctrl >/dev/null 2>&1; then
+    return 0
+  fi
+  moved_any=0
+  desktop_count="$(DISPLAY="$KEEPALIVE_DISPLAY" wmctrl -d 2>/dev/null | wc -l | tr -d ' ' || true)"
+  case "$desktop_count" in
+    ''|*[!0-9]*) desktop_count=0 ;;
+  esac
+  if [ "$desktop_count" -le "$target" ] 2>/dev/null; then
+    DISPLAY="$KEEPALIVE_DISPLAY" wmctrl -n $((target + 1)) >/dev/null 2>&1 || true
+  fi
+  while IFS= read -r win_id; do
+    [ -n "$win_id" ] || continue
+    moved_any=1
+    current_ws="$(DISPLAY="$KEEPALIVE_DISPLAY" xdotool get_desktop_for_window "$win_id" 2>/dev/null || true)"
+    case "$current_ws" in
+      ''|*[!0-9-]*) current_ws=-1 ;;
+    esac
+    if [ "$current_ws" -ne "$target" ] 2>/dev/null; then
+      DISPLAY="$KEEPALIVE_DISPLAY" wmctrl -i -r "$win_id" -t "$target" >/dev/null 2>&1 || true
+      keepalive_log "vnc_browser_workspace_set pid=${pid} win=${win_id} from=${current_ws} to=${target}"
+    fi
+  done < <(DISPLAY="$KEEPALIVE_DISPLAY" xdotool search --pid "$pid" 2>/dev/null || true)
+  if [ "$moved_any" -eq 1 ]; then
     return 0
   fi
   win_id="$(keepalive_pick_window_for_pid "$pid" || true)"
@@ -689,13 +713,6 @@ ensure_keepalive_window_workspace() {
   case "$current_ws" in
     ''|*[!0-9-]*) current_ws=-1 ;;
   esac
-  desktop_count="$(DISPLAY="$KEEPALIVE_DISPLAY" wmctrl -d 2>/dev/null | wc -l | tr -d ' ' || true)"
-  case "$desktop_count" in
-    ''|*[!0-9]*) desktop_count=0 ;;
-  esac
-  if [ "$desktop_count" -le "$target" ] 2>/dev/null; then
-    DISPLAY="$KEEPALIVE_DISPLAY" wmctrl -n $((target + 1)) >/dev/null 2>&1 || true
-  fi
   if [ "$current_ws" -ne "$target" ] 2>/dev/null; then
     DISPLAY="$KEEPALIVE_DISPLAY" wmctrl -i -r "$win_id" -t "$target" >/dev/null 2>&1 || true
     keepalive_log "vnc_browser_workspace_set pid=${pid} win=${win_id} from=${current_ws} to=${target}"
@@ -2345,16 +2362,24 @@ restore_custom_recover_tasks() {
 
 ensure_keepalive_desktop_service_registration() {
   local desktop_dir launcher service_dir service_cmdf
+  local launcher_tmp service_cmdf_tmp
+  local keepalive_display_cfg keepalive_workspace_cfg work_workspace_cfg desktop_resolution_cfg
   [ "$KEEPALIVE_MODE" = "vnc-browser" ] || return 0
 
   desktop_dir="$PERSIST_DIR/desktop"
   launcher="$desktop_dir/start-desktop.sh"
   service_dir="$PERSIST_DIR/services/desktop-gateway"
   service_cmdf="$service_dir/start.cmd"
+  launcher_tmp="${launcher}.tmp.$$"
+  service_cmdf_tmp="${service_cmdf}.tmp.$$"
+  keepalive_display_cfg="${KEEPALIVE_DISPLAY:-:99}"
+  keepalive_workspace_cfg="${KEEPALIVE_WORKSPACE:-1}"
+  work_workspace_cfg="${WORK_WORKSPACE:-0}"
+  desktop_resolution_cfg="${DESKTOP_RESOLUTION:-1366x768x24}"
 
   mkdir -p "$desktop_dir" "$service_dir"
 
-  cat > "$launcher" <<'EOF2'
+  cat > "$launcher_tmp" <<'EOF2'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -2422,7 +2447,7 @@ ensure_desktop_count() {
 move_window_to_workspace_by_pid() {
   local pid="$1"
   local target="$2"
-  local win_id
+  local win_id wins
   case "$pid" in
     ''|*[!0-9]*) return 1 ;;
   esac
@@ -2433,14 +2458,17 @@ move_window_to_workspace_by_pid() {
   command -v xdotool >/dev/null 2>&1 || return 0
   command -v wmctrl >/dev/null 2>&1 || return 0
   ensure_desktop_count "$target"
-  win_id=""
+  wins=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    win_id="$(DISPLAY="$DISPLAY_NAME" xdotool search --pid "$pid" 2>/dev/null | head -n1 || true)"
-    [ -n "$win_id" ] && break
+    wins="$(DISPLAY="$DISPLAY_NAME" xdotool search --pid "$pid" 2>/dev/null || true)"
+    [ -n "$wins" ] && break
     sleep 0.2
   done
-  [ -n "$win_id" ] || return 1
-  DISPLAY="$DISPLAY_NAME" wmctrl -i -r "$win_id" -t "$target" >/dev/null 2>&1 || true
+  [ -n "$wins" ] || return 1
+  while IFS= read -r win_id; do
+    [ -n "$win_id" ] || continue
+    DISPLAY="$DISPLAY_NAME" wmctrl -i -r "$win_id" -t "$target" >/dev/null 2>&1 || true
+  done <<< "$wins"
   return 0
 }
 
@@ -2587,11 +2615,21 @@ fi
 
 printf '{"ok":true,"action":"desktop_start","display":"%s","work_workspace":%s,"keepalive_workspace":%s}\n' "$DISPLAY_NAME" "$WORK_WORKSPACE" "$KEEPALIVE_WORKSPACE"
 EOF2
+  if [ ! -s "$launcher_tmp" ]; then
+    rm -f "$launcher_tmp" >/dev/null 2>&1 || true
+    return 1
+  fi
+  mv -f "$launcher_tmp" "$launcher"
   chmod 700 "$launcher" || true
 
-  cat > "$service_cmdf" <<EOF2
-PERSIST_ROOT="\$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; PERSIST_ROOT="\$(printf '%s' "\$PERSIST_ROOT" | sed -E 's#^(/home/node/[^/]+/workspace)/.+/workspace/?$#\\1#')"; if [ -d /home/node/a0/workspace ]; then PERSIST_ROOT="/home/node/a0/workspace"; fi; [ -z "\$PERSIST_ROOT" ] && PERSIST_ROOT="\$HOME"; HAPPYCAPY_PERSIST_ROOT="\$PERSIST_ROOT" HAPPYCAPY_KEEPALIVE_DISPLAY="${KEEPALIVE_DISPLAY}" HAPPYCAPY_KEEPALIVE_WORKSPACE="${KEEPALIVE_WORKSPACE}" HAPPYCAPY_WORK_WORKSPACE="${WORK_WORKSPACE}" HAPPYCAPY_DESKTOP_RESOLUTION="${DESKTOP_RESOLUTION}" bash "\$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
+  cat > "$service_cmdf_tmp" <<EOF2
+PERSIST_ROOT="\$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; PERSIST_ROOT="\$(printf '%s' "\$PERSIST_ROOT" | sed -E 's#^(/home/node/[^/]+/workspace)/.+/workspace/?$#\\1#')"; if [ -d /home/node/a0/workspace ]; then PERSIST_ROOT="/home/node/a0/workspace"; fi; [ -z "\$PERSIST_ROOT" ] && PERSIST_ROOT="\$HOME"; HAPPYCAPY_PERSIST_ROOT="\$PERSIST_ROOT" HAPPYCAPY_KEEPALIVE_DISPLAY="${keepalive_display_cfg}" HAPPYCAPY_KEEPALIVE_WORKSPACE="${keepalive_workspace_cfg}" HAPPYCAPY_WORK_WORKSPACE="${work_workspace_cfg}" HAPPYCAPY_DESKTOP_RESOLUTION="${desktop_resolution_cfg}" bash "\$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
 EOF2
+  if [ ! -s "$service_cmdf_tmp" ]; then
+    rm -f "$service_cmdf_tmp" >/dev/null 2>&1 || true
+    return 1
+  fi
+  mv -f "$service_cmdf_tmp" "$service_cmdf"
   chmod 600 "$service_cmdf" || true
 }
 
