@@ -1876,9 +1876,11 @@ load_autorestore_preferences() {
     install_log "autorestore_env_missing path=${AUTORESTORE_ENV_FILE}"
   fi
   # Extension-only behavior: vnc-browser keepalive requires desktop + browser.
-  # Keep default behavior unchanged unless keepalive mode is explicitly enabled.
+  # For cold-start/new machines, also force lightweight desktop env install
+  # (openbox/xterm) so keepalive/UI can work without manual intervention.
   if [ "$KEEPALIVE_MODE" = "vnc-browser" ]; then
     AUTORESTORE_DESKTOP=1
+    AUTORESTORE_DESKTOP_ENV=1
     AUTORESTORE_START_SERVICES=1
     if [ -z "$AUTORESTORE_BROWSER" ]; then
       AUTORESTORE_BROWSER="$KEEPALIVE_BROWSER"
@@ -1906,7 +1908,12 @@ ensure_autorestore_docker() {
 
 ensure_autorestore_browser() {
   local browser="$AUTORESTORE_BROWSER"
+  local force_install
   local rc_update rc_install
+  force_install=0
+  if [ "$KEEPALIVE_MODE" = "vnc-browser" ]; then
+    force_install=1
+  fi
   rc_update=0
   rc_install=0
   [ -n "$browser" ] || return 0
@@ -1914,27 +1921,40 @@ ensure_autorestore_browser() {
   case "$browser" in
     chromium)
       if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
-        install_log "browser_dep_check rc=0 browser=chromium reason=already_present"
-        return 0
+        if [ "$force_install" -eq 0 ]; then
+          install_log "browser_dep_check rc=0 browser=chromium reason=already_present"
+          return 0
+        fi
+        install_log "browser_dep_check rc=0 browser=chromium reason=present_but_forced_reinstall"
       fi
       ;;
     firefox)
       if command -v firefox >/dev/null 2>&1; then
-        install_log "browser_dep_check rc=0 browser=firefox reason=already_present"
-        return 0
+        if [ "$force_install" -eq 0 ]; then
+          install_log "browser_dep_check rc=0 browser=firefox reason=already_present"
+          return 0
+        fi
+        install_log "browser_dep_check rc=0 browser=firefox reason=present_but_forced_reinstall"
       fi
       ;;
     chrome)
       if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
-        install_log "browser_dep_check rc=0 browser=chrome reason=already_present"
-        return 0
+        if [ "$force_install" -eq 0 ]; then
+          install_log "browser_dep_check rc=0 browser=chrome reason=already_present"
+          return 0
+        fi
+        install_log "browser_dep_check rc=0 browser=chrome reason=present_but_forced_reinstall"
       fi
       ;;
   esac
-  install_log "browser_dep_check rc=1 browser=${browser} reason=missing_binary"
+  if [ "$force_install" -eq 1 ]; then
+    install_log "browser_dep_check rc=1 browser=${browser} reason=forced_install keepalive_mode=${KEEPALIVE_MODE}"
+  else
+    install_log "browser_dep_check rc=1 browser=${browser} reason=missing_binary"
+  fi
   if ! can_root; then
     keepalive_log "autorestore_browser_missing reason=no_root browser=${browser}"
-    install_log "browser_dep_install_skip browser=${browser} reason=no_root"
+    install_log "browser_dep_install_skip browser=${browser} reason=no_root force_install=${force_install}"
     return 1
   fi
 
@@ -2048,12 +2068,14 @@ ensure_autorestore_browser() {
 }
 
 ensure_autorestore_desktop_packages() {
-  local missing need_window_tools rc
+  local missing need_window_tools force_install rc
   [ "$AUTORESTORE_DESKTOP" -eq 1 ] || return 0
   missing=""
   need_window_tools=0
+  force_install=0
   if [ "$KEEPALIVE_MODE" = "vnc-browser" ]; then
     need_window_tools=1
+    force_install=1
   fi
   if ! command -v Xvfb >/dev/null 2>&1; then missing="${missing} Xvfb"; fi
   if ! command -v x11vnc >/dev/null 2>&1; then missing="${missing} x11vnc"; fi
@@ -2065,14 +2087,18 @@ ensure_autorestore_desktop_packages() {
     if ! command -v wmctrl >/dev/null 2>&1; then missing="${missing} wmctrl"; fi
   fi
   missing="$(printf '%s' "$missing" | sed -E 's/^ +//; s/ +/ /g')"
-  if [ -z "$missing" ]; then
+  if [ -z "$missing" ] && [ "$force_install" -eq 0 ]; then
     install_log "desktop_dep_check rc=0 keepalive_mode=${KEEPALIVE_MODE} missing=none"
     return 0
   fi
-  install_log "desktop_dep_check rc=1 keepalive_mode=${KEEPALIVE_MODE} missing=${missing}"
+  if [ -z "$missing" ] && [ "$force_install" -eq 1 ]; then
+    install_log "desktop_dep_check rc=0 keepalive_mode=${KEEPALIVE_MODE} missing=none reason=forced_reinstall"
+  else
+    install_log "desktop_dep_check rc=1 keepalive_mode=${KEEPALIVE_MODE} missing=${missing}"
+  fi
   if ! can_root; then
     keepalive_log "autorestore_desktop_missing reason=no_root missing=${missing}"
-    install_log "desktop_dep_install_skip reason=no_root missing=${missing}"
+    install_log "desktop_dep_install_skip reason=no_root missing=${missing} force_install=${force_install}"
     return 1
   fi
   rc=0
@@ -2130,6 +2156,10 @@ ensure_autorestore_desktop_packages() {
   if [ "$need_window_tools" -eq 1 ]; then
     if ! command -v xdotool >/dev/null 2>&1; then missing="${missing} xdotool"; fi
     if ! command -v wmctrl >/dev/null 2>&1; then missing="${missing} wmctrl"; fi
+  fi
+  if [ "$AUTORESTORE_DESKTOP_ENV" -eq 1 ]; then
+    if ! command -v openbox >/dev/null 2>&1; then missing="${missing} openbox"; fi
+    if ! command -v xterm >/dev/null 2>&1; then missing="${missing} xterm"; fi
   fi
   missing="$(printf '%s' "$missing" | sed -E 's/^ +//; s/ +/ /g')"
   if [ -n "$missing" ]; then
