@@ -1820,46 +1820,49 @@ load_autorestore_preferences() {
   AUTORESTORE_DESKTOP=0
   AUTORESTORE_DESKTOP_ENV=0
   AUTORESTORE_START_SERVICES=0
-  [ -f "$AUTORESTORE_ENV_FILE" ] || return 0
-  while IFS='=' read -r key value; do
-    key="$(printf '%s' "${key:-}" | tr -d '[:space:]')"
-    value="$(printf '%s' "${value:-}" | tr -d '\r')"
-    case "$key" in
-      HAPPYCAPY_AUTORESTORE_DOCKER)
-        case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
-          1|true|yes|on) AUTORESTORE_DOCKER=1 ;;
-        esac
-        ;;
-      HAPPYCAPY_AUTORESTORE_BROWSER)
-        value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
-        case "$value" in
-          chromium|firefox|chrome|auto) AUTORESTORE_BROWSER="$value" ;;
-        esac
-        ;;
-      HAPPYCAPY_AUTORESTORE_DESKTOP)
-        case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
-          1|true|yes|on) AUTORESTORE_DESKTOP=1 ;;
-        esac
-        ;;
-      HAPPYCAPY_AUTORESTORE_DESKTOP_ENV)
-        case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
-          1|true|yes|on) AUTORESTORE_DESKTOP_ENV=1 ;;
-          *) AUTORESTORE_DESKTOP_ENV=0 ;;
-        esac
-        ;;
-      HAPPYCAPY_AUTORESTORE_START_SERVICES)
-        case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
-          1|true|yes|on) AUTORESTORE_START_SERVICES=1 ;;
-          *) AUTORESTORE_START_SERVICES=0 ;;
-        esac
-        ;;
-      HAPPYCAPY_EXTERNAL_RECOVER_URL)
-        if [ -z "$EXTERNAL_RECOVER_URL" ]; then
-          EXTERNAL_RECOVER_URL="$value"
-        fi
-        ;;
-    esac
-  done < "$AUTORESTORE_ENV_FILE"
+  if [ -f "$AUTORESTORE_ENV_FILE" ]; then
+    while IFS='=' read -r key value; do
+      key="$(printf '%s' "${key:-}" | tr -d '[:space:]')"
+      value="$(printf '%s' "${value:-}" | tr -d '\r')"
+      case "$key" in
+        HAPPYCAPY_AUTORESTORE_DOCKER)
+          case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+            1|true|yes|on) AUTORESTORE_DOCKER=1 ;;
+          esac
+          ;;
+        HAPPYCAPY_AUTORESTORE_BROWSER)
+          value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+          case "$value" in
+            chromium|firefox|chrome|auto) AUTORESTORE_BROWSER="$value" ;;
+          esac
+          ;;
+        HAPPYCAPY_AUTORESTORE_DESKTOP)
+          case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+            1|true|yes|on) AUTORESTORE_DESKTOP=1 ;;
+          esac
+          ;;
+        HAPPYCAPY_AUTORESTORE_DESKTOP_ENV)
+          case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+            1|true|yes|on) AUTORESTORE_DESKTOP_ENV=1 ;;
+            *) AUTORESTORE_DESKTOP_ENV=0 ;;
+          esac
+          ;;
+        HAPPYCAPY_AUTORESTORE_START_SERVICES)
+          case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+            1|true|yes|on) AUTORESTORE_START_SERVICES=1 ;;
+            *) AUTORESTORE_START_SERVICES=0 ;;
+          esac
+          ;;
+        HAPPYCAPY_EXTERNAL_RECOVER_URL)
+          if [ -z "$EXTERNAL_RECOVER_URL" ]; then
+            EXTERNAL_RECOVER_URL="$value"
+          fi
+          ;;
+      esac
+    done < "$AUTORESTORE_ENV_FILE"
+  else
+    install_log "autorestore_env_missing path=${AUTORESTORE_ENV_FILE}"
+  fi
   # Extension-only behavior: vnc-browser keepalive requires desktop + browser.
   # Keep default behavior unchanged unless keepalive mode is explicitly enabled.
   if [ "$KEEPALIVE_MODE" = "vnc-browser" ]; then
