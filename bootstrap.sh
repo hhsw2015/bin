@@ -130,6 +130,21 @@ esac
 if [ "$HEARTBEAT_TIMEOUT_SEC" -lt 2 ] 2>/dev/null; then
   HEARTBEAT_TIMEOUT_SEC=2
 fi
+BOOTSTRAP_LOCK_WAIT_RAW="${HAPPYCAPY_BOOTSTRAP_LOCK_WAIT_SEC:-45}"
+case "$BOOTSTRAP_LOCK_WAIT_RAW" in
+  ''|*[!0-9]*)
+    BOOTSTRAP_LOCK_WAIT_SEC=45
+    ;;
+  *)
+    BOOTSTRAP_LOCK_WAIT_SEC="$BOOTSTRAP_LOCK_WAIT_RAW"
+    ;;
+esac
+if [ "$BOOTSTRAP_LOCK_WAIT_SEC" -lt 5 ] 2>/dev/null; then
+  BOOTSTRAP_LOCK_WAIT_SEC=5
+fi
+if [ "$BOOTSTRAP_LOCK_WAIT_SEC" -gt 240 ] 2>/dev/null; then
+  BOOTSTRAP_LOCK_WAIT_SEC=240
+fi
 HEARTBEAT_LOG_PATH="${HAPPYCAPY_HEARTBEAT_LOG_PATH:-/tmp/happycapy-heartbeat.log}"
 HEARTBEAT_EXTERNAL_KEEPALIVE_RAW="$(printf '%s' "${HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE:-1}" | tr '[:upper:]' '[:lower:]')"
 HEARTBEAT_EXTERNAL_KEEPALIVE=0
@@ -4455,15 +4470,28 @@ if [ "$WATCHDOG_MODE" -ne 1 ] && [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [
   fi
 fi
 
-if ! acquire_bootstrap_lock; then
-  p2222=0
-  if is_port_listening "$SSH_PORT"; then p2222=1; fi
-  p8080=0
-  if is_port_listening 8080; then p8080=1; fi
-  if [ "$p2222" -eq 1 ] && [ "$p8080" -eq 1 ]; then
-    printf '{"status":"ok","message":"bootstrap_lock_busy","p2222":%s,"p8080":%s}\n' "$p2222" "$p8080"
-    exit 0
-  fi
+LOCK_ACQUIRED=0
+if acquire_bootstrap_lock; then
+  LOCK_ACQUIRED=1
+else
+  lock_deadline="$(( $(date +%s) + BOOTSTRAP_LOCK_WAIT_SEC ))"
+  while [ "$(date +%s)" -lt "$lock_deadline" ]; do
+    p2222=0
+    if is_port_listening "$SSH_PORT"; then p2222=1; fi
+    p8080=0
+    if is_port_listening 8080; then p8080=1; fi
+    if [ "$p2222" -eq 1 ] && [ "$p8080" -eq 1 ]; then
+      printf '{"status":"ok","message":"bootstrap_lock_busy","p2222":%s,"p8080":%s}\n' "$p2222" "$p8080"
+      exit 0
+    fi
+    if acquire_bootstrap_lock; then
+      LOCK_ACQUIRED=1
+      break
+    fi
+    sleep 1
+  done
+fi
+if [ "$LOCK_ACQUIRED" -ne 1 ]; then
   emit_error "bootstrap lock busy"
   exit 1
 fi
