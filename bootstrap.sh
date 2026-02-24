@@ -80,6 +80,7 @@ EXTERNAL_RECOVER_STATE_FILE="${PERSIST_DIR}/external-recover.state"
 EXTERNAL_RECOVER_LOG="${HAPPYCAPY_EXTERNAL_RECOVER_LOG:-/tmp/happycapy-external-recover.log}"
 AUTORESTORE_WORKER_PID_FILE="${PERSIST_DIR}/autorestore-worker.pid"
 AUTORESTORE_WORKER_LOG="${HAPPYCAPY_AUTORESTORE_LOG:-/tmp/happycapy-autorestore.log}"
+AUTORESTORE_DEPS_BOOTID_FILE="${PERSIST_DIR}/autorestore-deps.bootid"
 BOOTSTRAP_LOOP_PID_FILE="${PERSIST_DIR}/bootstrap-loop.pid"
 BOOTSTRAP_LOOP_LOG="${HAPPYCAPY_BOOTSTRAP_LOG:-/tmp/hc-bootstrap-loop.log}"
 BOOTSTRAP_LOCK_DIR="${PERSIST_DIR}/bootstrap.lock"
@@ -151,6 +152,13 @@ HEARTBEAT_EXTERNAL_KEEPALIVE=0
 case "$HEARTBEAT_EXTERNAL_KEEPALIVE_RAW" in
   1|true|yes|on) HEARTBEAT_EXTERNAL_KEEPALIVE=1 ;;
 esac
+AUTORESTORE_FORCE_REINSTALL_RAW="$(printf '%s' "${HAPPYCAPY_AUTORESTORE_FORCE_REINSTALL:-0}" | tr '[:upper:]' '[:lower:]')"
+AUTORESTORE_FORCE_REINSTALL=0
+case "$AUTORESTORE_FORCE_REINSTALL_RAW" in
+  1|true|yes|on) AUTORESTORE_FORCE_REINSTALL=1 ;;
+esac
+AUTORESTORE_FORCE_INSTALL_ROUND=0
+AUTORESTORE_FORCE_INSTALL_BOOT_ID=""
 KEEPALIVE_MODE_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_MODE:-vnc-browser}" | tr '[:upper:]' '[:lower:]')"
 KEEPALIVE_MODE="vnc-browser"
 case "$KEEPALIVE_MODE_RAW" in
@@ -1841,6 +1849,50 @@ install_packages() {
   fi
 }
 
+read_boot_id() {
+  local boot_id
+  boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  if [ -z "$boot_id" ]; then
+    boot_id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$boot_id"
+}
+
+prepare_autorestore_install_round() {
+  AUTORESTORE_FORCE_INSTALL_ROUND=0
+  AUTORESTORE_FORCE_INSTALL_BOOT_ID=""
+  if [ "$KEEPALIVE_MODE" != "vnc-browser" ]; then
+    return 0
+  fi
+  if [ "$AUTORESTORE_FORCE_REINSTALL" -eq 1 ]; then
+    AUTORESTORE_FORCE_INSTALL_ROUND=1
+    AUTORESTORE_FORCE_INSTALL_BOOT_ID="$(read_boot_id)"
+    return 0
+  fi
+  local boot_id last_boot
+  boot_id="$(read_boot_id)"
+  [ -n "$boot_id" ] || return 0
+  last_boot="$(cat "$AUTORESTORE_DEPS_BOOTID_FILE" 2>/dev/null | head -n1 || true)"
+  if [ "$last_boot" != "$boot_id" ]; then
+    AUTORESTORE_FORCE_INSTALL_ROUND=1
+    AUTORESTORE_FORCE_INSTALL_BOOT_ID="$boot_id"
+  fi
+  return 0
+}
+
+mark_autorestore_install_round_done() {
+  if [ "$AUTORESTORE_FORCE_INSTALL_ROUND" -ne 1 ] 2>/dev/null; then
+    return 0
+  fi
+  local boot_id
+  boot_id="${AUTORESTORE_FORCE_INSTALL_BOOT_ID:-}"
+  [ -n "$boot_id" ] || boot_id="$(read_boot_id)"
+  [ -n "$boot_id" ] || return 0
+  mkdir -p "$(dirname "$AUTORESTORE_DEPS_BOOTID_FILE")" >/dev/null 2>&1 || true
+  printf '%s\n' "$boot_id" > "$AUTORESTORE_DEPS_BOOTID_FILE" 2>/dev/null || true
+  return 0
+}
+
 load_autorestore_preferences() {
   AUTORESTORE_DOCKER=0
   AUTORESTORE_BROWSER=""
@@ -1926,7 +1978,7 @@ ensure_autorestore_browser() {
   local force_install
   local rc_update rc_install
   force_install=0
-  if [ "$KEEPALIVE_MODE" = "vnc-browser" ]; then
+  if [ "$AUTORESTORE_FORCE_INSTALL_ROUND" -eq 1 ] 2>/dev/null; then
     force_install=1
   fi
   rc_update=0
@@ -2090,6 +2142,8 @@ ensure_autorestore_desktop_packages() {
   force_install=0
   if [ "$KEEPALIVE_MODE" = "vnc-browser" ]; then
     need_window_tools=1
+  fi
+  if [ "$AUTORESTORE_FORCE_INSTALL_ROUND" -eq 1 ] 2>/dev/null; then
     force_install=1
   fi
   if ! command -v Xvfb >/dev/null 2>&1; then missing="${missing} Xvfb"; fi
@@ -2313,6 +2367,9 @@ if [ -z "$PERSIST_ROOT" ]; then
 fi
 HC_ROOT="${PERSIST_ROOT%/}/.happycapy"
 DROOT="$HC_ROOT/desktop"
+APP_ROOT="$HC_ROOT/apps/desktop"
+NOVNC_ROOT="$APP_ROOT/novnc-web"
+WORK_TERM_PID_FILE="$DROOT/work-terminal.pid"
 mkdir -p "$DROOT"
 
 DISPLAY_NAME="${HAPPYCAPY_KEEPALIVE_DISPLAY:-:99}"
@@ -2406,23 +2463,84 @@ if ! pgrep -af "x11vnc .*rfbport 5901" >/dev/null 2>&1; then
 fi
 sleep 0.3
 
-if ! pgrep -af "websockify .* 6080 " >/dev/null 2>&1 && ! pgrep -af "websockify .* 6080$" >/dev/null 2>&1; then
-  if command -v websockify >/dev/null 2>&1; then
-    WEB_ROOT=""
-    for p in /usr/share/novnc /usr/share/noVNC /usr/local/share/novnc /usr/local/share/noVNC; do
-      if [ -d "$p" ]; then
-        WEB_ROOT="$p"
-        break
+resolve_web_root() {
+  local src
+  if [ -d "$NOVNC_ROOT" ] && { [ -f "$NOVNC_ROOT/vnc_lite.html" ] || [ -f "$NOVNC_ROOT/vnc.html" ]; }; then
+    printf '%s\n' "$NOVNC_ROOT"
+    return 0
+  fi
+  for src in /opt/novnc /usr/share/novnc /usr/share/noVNC /usr/local/share/novnc /usr/local/share/noVNC; do
+    if [ -d "$src" ] && { [ -f "$src/vnc_lite.html" ] || [ -f "$src/vnc.html" ]; }; then
+      mkdir -p "$NOVNC_ROOT" >/dev/null 2>&1 || true
+      if [ ! -f "$NOVNC_ROOT/vnc_lite.html" ] && [ ! -f "$NOVNC_ROOT/vnc.html" ]; then
+        cp -a "$src"/. "$NOVNC_ROOT"/ >/dev/null 2>&1 || true
       fi
+      if [ -f "$NOVNC_ROOT/vnc_lite.html" ] || [ -f "$NOVNC_ROOT/vnc.html" ]; then
+        printf '%s\n' "$NOVNC_ROOT"
+        return 0
+      fi
+      printf '%s\n' "$src"
+      return 0
+    fi
+  done
+  return 1
+}
+
+websockify_6080_cmdline() {
+  ps -eo args= 2>/dev/null | awk '/[w]ebsockify/ && ($0 ~ / 6080 / || $0 ~ / 6080$/ || $0 ~ /:6080 / || $0 ~ /:6080$/) {print; exit}'
+}
+
+kill_websockify_6080() {
+  ps -eo pid=,args= 2>/dev/null | \
+    awk '/[w]ebsockify/ && ($0 ~ / 6080 / || $0 ~ / 6080$/ || $0 ~ /:6080 / || $0 ~ /:6080$/) {print $1}' | \
+    while read -r pid; do
+      [ -n "$pid" ] || continue
+      kill "$pid" >/dev/null 2>&1 || true
     done
+  sleep 0.2
+  ps -eo pid=,args= 2>/dev/null | \
+    awk '/[w]ebsockify/ && ($0 ~ / 6080 / || $0 ~ / 6080$/ || $0 ~ /:6080 / || $0 ~ /:6080$/) {print $1}' | \
+    while read -r pid; do
+      [ -n "$pid" ] || continue
+      kill -9 "$pid" >/dev/null 2>&1 || true
+    done
+}
+
+prune_websockify_6080_duplicates() {
+  local keep_pid pid
+  keep_pid=""
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    if [ -z "$keep_pid" ]; then
+      keep_pid="$pid"
+      continue
+    fi
+    kill "$pid" >/dev/null 2>&1 || true
+  done < <(ps -eo pid=,args= 2>/dev/null | awk '/[w]ebsockify/ && ($0 ~ / 6080 / || $0 ~ / 6080$/ || $0 ~ /:6080 / || $0 ~ /:6080$/) {print $1}')
+}
+
+WEB_ROOT="$(resolve_web_root || true)"
+WSK_CMDLINE="$(websockify_6080_cmdline || true)"
+websockify_restart_needed=0
+if [ -z "$WSK_CMDLINE" ]; then
+  websockify_restart_needed=1
+elif [ -n "$WEB_ROOT" ] && ! printf '%s' "$WSK_CMDLINE" | grep -F -- "$WEB_ROOT" >/dev/null 2>&1; then
+  websockify_restart_needed=1
+fi
+
+if [ "$websockify_restart_needed" -eq 1 ]; then
+  kill_websockify_6080
+  if command -v websockify >/dev/null 2>&1; then
     if [ -n "$WEB_ROOT" ]; then
-      nohup websockify --web "$WEB_ROOT" 6080 localhost:5901 >"$DROOT/websockify.log" 2>&1 &
+      nohup websockify --web "$WEB_ROOT" 0.0.0.0:6080 localhost:5901 >"$DROOT/websockify.log" 2>&1 &
     else
-      nohup websockify 6080 localhost:5901 >"$DROOT/websockify.log" 2>&1 &
+      nohup websockify 0.0.0.0:6080 localhost:5901 >"$DROOT/websockify.log" 2>&1 &
     fi
   else
     nohup novnc_proxy --listen 6080 --vnc localhost:5901 >"$DROOT/websockify.log" 2>&1 &
   fi
+else
+  prune_websockify_6080_duplicates || true
 fi
 
 if command -v openbox >/dev/null 2>&1; then
@@ -2432,25 +2550,39 @@ if command -v openbox >/dev/null 2>&1; then
 fi
 XTERM_PID=""
 XTERM_NEW=0
-if command -v xterm >/dev/null 2>&1; then
-  if ! pgrep -f "xterm.*${DISPLAY_NAME}" >/dev/null 2>&1; then
-    nohup env DISPLAY="$DISPLAY_NAME" xterm -geometry 100x30+40+40 >"$DROOT/xterm.log" 2>&1 &
+WORK_TERM_PID=0
+if [ -f "$WORK_TERM_PID_FILE" ]; then
+  WORK_TERM_PID="$(cat "$WORK_TERM_PID_FILE" 2>/dev/null | tr -dc '0-9')"
+fi
+case "$WORK_TERM_PID" in ''|*[!0-9]*) WORK_TERM_PID=0 ;; esac
+if [ "$WORK_TERM_PID" -gt 0 ] 2>/dev/null && kill -0 "$WORK_TERM_PID" >/dev/null 2>&1; then
+  XTERM_PID="$WORK_TERM_PID"
+else
+  TERM_CMD=""
+  if command -v xterm >/dev/null 2>&1; then
+    TERM_CMD="xterm -geometry 100x30+40+40"
+  elif command -v x-terminal-emulator >/dev/null 2>&1; then
+    TERM_CMD="x-terminal-emulator"
+  elif command -v lxterminal >/dev/null 2>&1; then
+    TERM_CMD="lxterminal"
+  elif command -v xfce4-terminal >/dev/null 2>&1; then
+    TERM_CMD="xfce4-terminal"
+  fi
+  if [ -n "$TERM_CMD" ]; then
+    nohup env DISPLAY="$DISPLAY_NAME" bash -lc "$TERM_CMD" >"$DROOT/xterm.log" 2>&1 &
     XTERM_PID="$!"
     XTERM_NEW=1
-  else
-    XTERM_PID="$(pgrep -f "xterm.*${DISPLAY_NAME}" 2>/dev/null | head -n1 || true)"
+    printf '%s\n' "$XTERM_PID" > "$WORK_TERM_PID_FILE"
   fi
 fi
 if [ -n "$XTERM_PID" ]; then
   move_window_to_workspace_by_pid "$XTERM_PID" "$WORK_WORKSPACE" || true
-  if [ "$XTERM_NEW" -eq 1 ] 2>/dev/null; then
-    ensure_desktop_count "$WORK_WORKSPACE"
-    if command -v xdotool >/dev/null 2>&1; then
-      DISPLAY="$DISPLAY_NAME" xdotool set_desktop "$WORK_WORKSPACE" >/dev/null 2>&1 || true
-    elif command -v wmctrl >/dev/null 2>&1; then
-      DISPLAY="$DISPLAY_NAME" wmctrl -s "$WORK_WORKSPACE" >/dev/null 2>&1 || true
-    fi
-  fi
+fi
+ensure_desktop_count "$WORK_WORKSPACE"
+if command -v xdotool >/dev/null 2>&1; then
+  DISPLAY="$DISPLAY_NAME" xdotool set_desktop "$WORK_WORKSPACE" >/dev/null 2>&1 || true
+elif command -v wmctrl >/dev/null 2>&1; then
+  DISPLAY="$DISPLAY_NAME" wmctrl -s "$WORK_WORKSPACE" >/dev/null 2>&1 || true
 fi
 
 printf '{"ok":true,"action":"desktop_start","display":"%s","work_workspace":%s,"keepalive_workspace":%s}\n' "$DISPLAY_NAME" "$WORK_WORKSPACE" "$KEEPALIVE_WORKSPACE"
@@ -2458,7 +2590,7 @@ EOF2
   chmod 700 "$launcher" || true
 
   cat > "$service_cmdf" <<EOF2
-PERSIST_ROOT="\$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; [ -z "\$PERSIST_ROOT" ] && PERSIST_ROOT="\$HOME"; HAPPYCAPY_PERSIST_ROOT="\$PERSIST_ROOT" HAPPYCAPY_KEEPALIVE_DISPLAY="${KEEPALIVE_DISPLAY}" HAPPYCAPY_KEEPALIVE_WORKSPACE="${KEEPALIVE_WORKSPACE}" HAPPYCAPY_WORK_WORKSPACE="${WORK_WORKSPACE}" HAPPYCAPY_DESKTOP_RESOLUTION="${DESKTOP_RESOLUTION}" bash "\$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
+PERSIST_ROOT="\$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; PERSIST_ROOT="\$(printf '%s' "\$PERSIST_ROOT" | sed -E 's#^(/home/node/[^/]+/workspace)/.+/workspace/?$#\\1#')"; if [ -d /home/node/a0/workspace ]; then PERSIST_ROOT="/home/node/a0/workspace"; fi; [ -z "\$PERSIST_ROOT" ] && PERSIST_ROOT="\$HOME"; HAPPYCAPY_PERSIST_ROOT="\$PERSIST_ROOT" HAPPYCAPY_KEEPALIVE_DISPLAY="${KEEPALIVE_DISPLAY}" HAPPYCAPY_KEEPALIVE_WORKSPACE="${KEEPALIVE_WORKSPACE}" HAPPYCAPY_WORK_WORKSPACE="${WORK_WORKSPACE}" HAPPYCAPY_DESKTOP_RESOLUTION="${DESKTOP_RESOLUTION}" bash "\$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
 EOF2
   chmod 600 "$service_cmdf" || true
 }
@@ -2496,11 +2628,24 @@ run_external_recover_url_once() {
 }
 
 run_workspace_autorestore() {
+  local browser_rc desktop_rc
   install_log "autorestore_begin mode=${KEEPALIVE_MODE}"
   load_autorestore_preferences
+  prepare_autorestore_install_round
   ensure_autorestore_docker || true
-  ensure_autorestore_browser || keepalive_log "autorestore_browser_prepare_failed target=${AUTORESTORE_BROWSER:-none}"
-  ensure_autorestore_desktop_packages || keepalive_log "autorestore_desktop_prepare_failed"
+  browser_rc=0
+  ensure_autorestore_browser || {
+    browser_rc=$?
+    keepalive_log "autorestore_browser_prepare_failed target=${AUTORESTORE_BROWSER:-none}"
+  }
+  desktop_rc=0
+  ensure_autorestore_desktop_packages || {
+    desktop_rc=$?
+    keepalive_log "autorestore_desktop_prepare_failed"
+  }
+  if [ "$browser_rc" -eq 0 ] && [ "$desktop_rc" -eq 0 ]; then
+    mark_autorestore_install_round_done
+  fi
   ensure_keepalive_desktop_service_registration || keepalive_log "keepalive_desktop_service_registration_failed"
   if [ "$AUTORESTORE_START_SERVICES" -eq 1 ]; then
     restore_persisted_services || true
