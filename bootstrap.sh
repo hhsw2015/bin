@@ -1788,9 +1788,9 @@ install_packages() {
   if command -v apt-get >/dev/null 2>&1; then
     install_log "core_install_start manager=apt"
     set +e
-    with_retry 2 run_root apt-get update -y >/tmp/hc-apt-update.log 2>&1
+    with_retry 3 run_root apt-get -o DPkg::Lock::Timeout=180 update -y >/tmp/hc-apt-update.log 2>&1
     rc_update=$?
-    with_retry 2 run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y \
       curl ca-certificates gzip openssh-server supervisor nodejs >/tmp/hc-apt-install.log 2>&1
     rc_install=$?
     set -e
@@ -1879,8 +1879,8 @@ ensure_autorestore_docker() {
   can_root || return 0
   if ! command -v docker >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
-      run_root apt-get update -y >/tmp/hc-autorestore-docker-install.log 2>&1 || true
-      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io >>/tmp/hc-autorestore-docker-install.log 2>&1 || true
+      with_retry 3 run_root apt-get -o DPkg::Lock::Timeout=180 update -y >/tmp/hc-autorestore-docker-install.log 2>&1 || true
+      with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y docker.io >>/tmp/hc-autorestore-docker-install.log 2>&1 || true
     elif command -v apk >/dev/null 2>&1; then
       run_root apk add --no-cache docker >/tmp/hc-autorestore-docker-install.log 2>&1 || true
     elif command -v yum >/dev/null 2>&1; then
@@ -1931,12 +1931,12 @@ ensure_autorestore_browser() {
       if command -v apt-get >/dev/null 2>&1; then
         install_log "browser_dep_install_start browser=chromium manager=apt log=/tmp/hc-autorestore-browser-install.log"
         set +e
-        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1
+        with_retry 3 run_root apt-get -o DPkg::Lock::Timeout=180 update -y >/tmp/hc-autorestore-browser-install.log 2>&1
         rc_update=$?
-        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium >>/tmp/hc-autorestore-browser-install.log 2>&1
+        with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y chromium >>/tmp/hc-autorestore-browser-install.log 2>&1
         rc_install=$?
         if [ "$rc_install" -ne 0 ]; then
-          run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium-browser >>/tmp/hc-autorestore-browser-install.log 2>&1
+          with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y chromium-browser >>/tmp/hc-autorestore-browser-install.log 2>&1
           rc_install=$?
         fi
         set -e
@@ -1961,12 +1961,12 @@ ensure_autorestore_browser() {
       if command -v apt-get >/dev/null 2>&1; then
         install_log "browser_dep_install_start browser=firefox manager=apt log=/tmp/hc-autorestore-browser-install.log"
         set +e
-        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1
+        with_retry 3 run_root apt-get -o DPkg::Lock::Timeout=180 update -y >/tmp/hc-autorestore-browser-install.log 2>&1
         rc_update=$?
-        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y firefox-esr >>/tmp/hc-autorestore-browser-install.log 2>&1
+        with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y firefox-esr >>/tmp/hc-autorestore-browser-install.log 2>&1
         rc_install=$?
         if [ "$rc_install" -ne 0 ]; then
-          run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y firefox >>/tmp/hc-autorestore-browser-install.log 2>&1
+          with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y firefox >>/tmp/hc-autorestore-browser-install.log 2>&1
           rc_install=$?
         fi
         set -e
@@ -1991,9 +1991,9 @@ ensure_autorestore_browser() {
       if command -v apt-get >/dev/null 2>&1; then
         install_log "browser_dep_install_start browser=chrome manager=apt log=/tmp/hc-autorestore-browser-install.log"
         set +e
-        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1
+        with_retry 3 run_root apt-get -o DPkg::Lock::Timeout=180 update -y >/tmp/hc-autorestore-browser-install.log 2>&1
         rc_update=$?
-        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable >>/tmp/hc-autorestore-browser-install.log 2>&1
+        with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y google-chrome-stable >>/tmp/hc-autorestore-browser-install.log 2>&1
         rc_install=$?
         set -e
         install_log "browser_dep_install_end browser=chrome manager=apt rc_update=${rc_update} rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
@@ -2067,15 +2067,15 @@ ensure_autorestore_desktop_packages() {
   if command -v apt-get >/dev/null 2>&1; then
     install_log "desktop_dep_install_start manager=apt missing=${missing} log=/tmp/hc-autorestore-desktop-install.log"
     set +e
-    run_root apt-get update -y >/tmp/hc-autorestore-desktop-install.log 2>&1
+    with_retry 3 run_root apt-get -o DPkg::Lock::Timeout=180 update -y >/tmp/hc-autorestore-desktop-install.log 2>&1
     rc=$?
-    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb x11vnc novnc websockify xdotool wmctrl >>/tmp/hc-autorestore-desktop-install.log 2>&1
+    with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y xvfb x11vnc novnc websockify xdotool wmctrl >>/tmp/hc-autorestore-desktop-install.log 2>&1
     rc=$((rc + $?))
     set -e
     install_log "desktop_dep_install_end manager=apt rc=${rc} log=/tmp/hc-autorestore-desktop-install.log"
     if [ "$AUTORESTORE_DESKTOP_ENV" -eq 1 ]; then
       set +e
-      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1
+      with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1
       rc=$?
       set -e
       install_log "desktop_env_install_end manager=apt rc=${rc} log=/tmp/hc-autorestore-desktop-install.log"
