@@ -2255,8 +2255,7 @@ ensure_keepalive_desktop_service_registration() {
 
   mkdir -p "$desktop_dir" "$service_dir"
 
-  if [ ! -x "$launcher" ]; then
-    cat > "$launcher" <<'EOF2'
+  cat > "$launcher" <<'EOF2'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -2411,8 +2410,7 @@ fi
 
 printf '{"ok":true,"action":"desktop_start","display":"%s","work_workspace":%s,"keepalive_workspace":%s}\n' "$DISPLAY_NAME" "$WORK_WORKSPACE" "$KEEPALIVE_WORKSPACE"
 EOF2
-    chmod 700 "$launcher" || true
-  fi
+  chmod 700 "$launcher" || true
 
   cat > "$service_cmdf" <<EOF2
 PERSIST_ROOT="\$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; [ -z "\$PERSIST_ROOT" ] && PERSIST_ROOT="\$HOME"; HAPPYCAPY_PERSIST_ROOT="\$PERSIST_ROOT" HAPPYCAPY_KEEPALIVE_DISPLAY="${KEEPALIVE_DISPLAY}" HAPPYCAPY_KEEPALIVE_WORKSPACE="${KEEPALIVE_WORKSPACE}" HAPPYCAPY_WORK_WORKSPACE="${WORK_WORKSPACE}" HAPPYCAPY_DESKTOP_RESOLUTION="${DESKTOP_RESOLUTION}" bash "\$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
