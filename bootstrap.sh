@@ -2418,7 +2418,7 @@ start_autorestore_worker_detached() {
 
 start_watchdog_worker_detached() {
   mkdir -p "$PERSIST_DIR"
-  local old_pid boot_bin
+  local old_pid boot_bin wait_sec wait_left
   old_pid=0
   if [ -f "$BOOTSTRAP_LOOP_PID_FILE" ]; then
     old_pid="$(cat "$BOOTSTRAP_LOOP_PID_FILE" 2>/dev/null | tr -dc '0-9')"
@@ -2426,6 +2426,24 @@ start_watchdog_worker_detached() {
   [ -z "$old_pid" ] && old_pid=0
   if [ "$old_pid" -gt 0 ] && kill -0 "$old_pid" >/dev/null 2>&1; then
     return 0
+  fi
+
+  # Avoid apt/dpkg lock races: watchdog startup path also runs core install.
+  # Wait a short window for detached autorestore worker to finish first.
+  wait_sec="${HAPPYCAPY_AUTORESTORE_START_WAIT_SEC:-240}"
+  case "$wait_sec" in
+    ''|*[!0-9]*) wait_sec=240 ;;
+  esac
+  wait_left="$wait_sec"
+  if autorestore_worker_running; then
+    install_log "watchdog_start_wait_autorestore wait_sec=${wait_sec}"
+  fi
+  while [ "$wait_left" -gt 0 ] && autorestore_worker_running; do
+    sleep 1
+    wait_left=$((wait_left - 1))
+  done
+  if autorestore_worker_running; then
+    install_log "watchdog_start_wait_autorestore_timeout waited=${wait_sec}"
   fi
 
   boot_bin="$PERSIST_BOOTSTRAP"
