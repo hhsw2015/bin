@@ -238,6 +238,18 @@ case "$KEEPALIVE_WORKSPACE_RAW" in
     KEEPALIVE_WORKSPACE="$KEEPALIVE_WORKSPACE_RAW"
     ;;
 esac
+WORK_WORKSPACE_RAW="${HAPPYCAPY_WORK_WORKSPACE:-0}"
+case "$WORK_WORKSPACE_RAW" in
+  ''|*[!0-9]*)
+    WORK_WORKSPACE=0
+    ;;
+  *)
+    WORK_WORKSPACE="$WORK_WORKSPACE_RAW"
+    ;;
+esac
+if [ "$KEEPALIVE_WORKSPACE" -ge 0 ] 2>/dev/null && [ "$KEEPALIVE_WORKSPACE" -eq "$WORK_WORKSPACE" ] 2>/dev/null; then
+  KEEPALIVE_WORKSPACE=$((WORK_WORKSPACE + 1))
+fi
 KEEPALIVE_CDP_PORT_RAW="${HAPPYCAPY_KEEPALIVE_CDP_PORT:-19222}"
 case "$KEEPALIVE_CDP_PORT_RAW" in
   ''|*[!0-9]*)
@@ -2264,7 +2276,72 @@ case "$DISPLAY_NAME" in
   :*) ;;
   *) DISPLAY_NAME=":${DISPLAY_NAME}" ;;
 esac
+KEEPALIVE_WORKSPACE_RAW="${HAPPYCAPY_KEEPALIVE_WORKSPACE:-1}"
+case "$KEEPALIVE_WORKSPACE_RAW" in
+  -1)
+    KEEPALIVE_WORKSPACE=-1
+    ;;
+  ''|*[!0-9]*)
+    KEEPALIVE_WORKSPACE=1
+    ;;
+  *)
+    KEEPALIVE_WORKSPACE="$KEEPALIVE_WORKSPACE_RAW"
+    ;;
+esac
+WORK_WORKSPACE_RAW="${HAPPYCAPY_WORK_WORKSPACE:-0}"
+case "$WORK_WORKSPACE_RAW" in
+  ''|*[!0-9]*)
+    WORK_WORKSPACE=0
+    ;;
+  *)
+    WORK_WORKSPACE="$WORK_WORKSPACE_RAW"
+    ;;
+esac
+if [ "$KEEPALIVE_WORKSPACE" -ge 0 ] 2>/dev/null && [ "$KEEPALIVE_WORKSPACE" -eq "$WORK_WORKSPACE" ] 2>/dev/null; then
+  KEEPALIVE_WORKSPACE=$((WORK_WORKSPACE + 1))
+fi
 RESOLUTION="${HAPPYCAPY_DESKTOP_RESOLUTION:-1366x768x24}"
+
+ensure_desktop_count() {
+  local target="$1"
+  local desktop_count
+  if [ "$target" -lt 0 ] 2>/dev/null; then
+    return 0
+  fi
+  command -v wmctrl >/dev/null 2>&1 || return 0
+  desktop_count="$(DISPLAY="$DISPLAY_NAME" wmctrl -d 2>/dev/null | wc -l | tr -d ' ' || true)"
+  case "$desktop_count" in
+    ''|*[!0-9]*) desktop_count=0 ;;
+  esac
+  if [ "$desktop_count" -le "$target" ] 2>/dev/null; then
+    DISPLAY="$DISPLAY_NAME" wmctrl -n $((target + 1)) >/dev/null 2>&1 || true
+  fi
+}
+
+move_window_to_workspace_by_pid() {
+  local pid="$1"
+  local target="$2"
+  local win_id
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$pid" -gt 0 ] 2>/dev/null || return 1
+  if [ "$target" -lt 0 ] 2>/dev/null; then
+    return 0
+  fi
+  command -v xdotool >/dev/null 2>&1 || return 0
+  command -v wmctrl >/dev/null 2>&1 || return 0
+  ensure_desktop_count "$target"
+  win_id=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    win_id="$(DISPLAY="$DISPLAY_NAME" xdotool search --pid "$pid" 2>/dev/null | head -n1 || true)"
+    [ -n "$win_id" ] && break
+    sleep 0.2
+  done
+  [ -n "$win_id" ] || return 1
+  DISPLAY="$DISPLAY_NAME" wmctrl -i -r "$win_id" -t "$target" >/dev/null 2>&1 || true
+  return 0
+}
 
 if ! command -v Xvfb >/dev/null 2>&1 || ! command -v x11vnc >/dev/null 2>&1; then
   echo "missing desktop deps (Xvfb/x11vnc)" >>"$DROOT/desktop-health.log"
@@ -2309,23 +2386,38 @@ if command -v openbox >/dev/null 2>&1; then
     nohup env DISPLAY="$DISPLAY_NAME" openbox >"$DROOT/openbox.log" 2>&1 &
   fi
 fi
+XTERM_PID=""
+XTERM_NEW=0
 if command -v xterm >/dev/null 2>&1; then
   if ! pgrep -f "xterm.*${DISPLAY_NAME}" >/dev/null 2>&1; then
     nohup env DISPLAY="$DISPLAY_NAME" xterm -geometry 100x30+40+40 >"$DROOT/xterm.log" 2>&1 &
+    XTERM_PID="$!"
+    XTERM_NEW=1
+  else
+    XTERM_PID="$(pgrep -f "xterm.*${DISPLAY_NAME}" 2>/dev/null | head -n1 || true)"
+  fi
+fi
+if [ -n "$XTERM_PID" ]; then
+  move_window_to_workspace_by_pid "$XTERM_PID" "$WORK_WORKSPACE" || true
+  if [ "$XTERM_NEW" -eq 1 ] 2>/dev/null; then
+    ensure_desktop_count "$WORK_WORKSPACE"
+    if command -v xdotool >/dev/null 2>&1; then
+      DISPLAY="$DISPLAY_NAME" xdotool set_desktop "$WORK_WORKSPACE" >/dev/null 2>&1 || true
+    elif command -v wmctrl >/dev/null 2>&1; then
+      DISPLAY="$DISPLAY_NAME" wmctrl -s "$WORK_WORKSPACE" >/dev/null 2>&1 || true
+    fi
   fi
 fi
 
-printf '{"ok":true,"action":"desktop_start","display":"%s"}\n' "$DISPLAY_NAME"
+printf '{"ok":true,"action":"desktop_start","display":"%s","work_workspace":%s,"keepalive_workspace":%s}\n' "$DISPLAY_NAME" "$WORK_WORKSPACE" "$KEEPALIVE_WORKSPACE"
 EOF2
     chmod 700 "$launcher" || true
   fi
 
-  if [ ! -s "$service_cmdf" ]; then
-    cat > "$service_cmdf" <<'EOF2'
-PERSIST_ROOT="$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; [ -z "$PERSIST_ROOT" ] && PERSIST_ROOT="$HOME"; HAPPYCAPY_PERSIST_ROOT="$PERSIST_ROOT" bash "$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
+  cat > "$service_cmdf" <<EOF2
+PERSIST_ROOT="\$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; [ -z "\$PERSIST_ROOT" ] && PERSIST_ROOT="\$HOME"; HAPPYCAPY_PERSIST_ROOT="\$PERSIST_ROOT" HAPPYCAPY_KEEPALIVE_DISPLAY="${KEEPALIVE_DISPLAY}" HAPPYCAPY_KEEPALIVE_WORKSPACE="${KEEPALIVE_WORKSPACE}" HAPPYCAPY_WORK_WORKSPACE="${WORK_WORKSPACE}" HAPPYCAPY_DESKTOP_RESOLUTION="${DESKTOP_RESOLUTION}" bash "\$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
 EOF2
-    chmod 600 "$service_cmdf" || true
-  fi
+  chmod 600 "$service_cmdf" || true
 }
 
 run_external_recover_url_once() {
@@ -2487,6 +2579,7 @@ start_watchdog_worker_detached() {
     HAPPYCAPY_KEEPALIVE_REFRESH_MODE_PATH="$KEEPALIVE_REFRESH_MODE_PATH" \
     HAPPYCAPY_KEEPALIVE_DISPLAY="$KEEPALIVE_DISPLAY" \
     HAPPYCAPY_KEEPALIVE_WORKSPACE="$KEEPALIVE_WORKSPACE" \
+    HAPPYCAPY_WORK_WORKSPACE="$WORK_WORKSPACE" \
     HAPPYCAPY_KEEPALIVE_PID_FILE="$KEEPALIVE_PID_FILE" \
     HAPPYCAPY_KEEPALIVE_URL_PATH="$KEEPALIVE_URL_PATH" \
     HAPPYCAPY_KEEPALIVE_PROFILE_DIR="$KEEPALIVE_PROFILE_DIR" \
