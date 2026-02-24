@@ -4406,6 +4406,10 @@ if [ "$WATCHDOG_MODE" -eq 1 ]; then
   setup_supervisor "$CHISEL_BIN" "$BOOT_WRITER" || true
   start_fallback_processes "$CHISEL_BIN" || true
   verify_services || true
+  # Watchdog is long-running. Do not hold bootstrap lock for the whole loop,
+  # otherwise subsequent bootstrap/recover calls will be permanently blocked.
+  release_bootstrap_lock || true
+  trap - EXIT INT TERM
   watchdog_loop "$WATCHDOG_INTERVAL_SEC"
   exit 0
 fi
