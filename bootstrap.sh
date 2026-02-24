@@ -2376,15 +2376,23 @@ run_workspace_autorestore() {
   install_log "autorestore_end mode=${KEEPALIVE_MODE}"
 }
 
+autorestore_worker_running() {
+  local worker_pid
+  if [ ! -f "$AUTORESTORE_WORKER_PID_FILE" ]; then
+    return 1
+  fi
+  worker_pid="$(cat "$AUTORESTORE_WORKER_PID_FILE" 2>/dev/null | tr -dc '0-9')"
+  [ -n "$worker_pid" ] || return 1
+  if [ "$worker_pid" -gt 0 ] 2>/dev/null && kill -0 "$worker_pid" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 start_autorestore_worker_detached() {
   mkdir -p "$PERSIST_DIR"
-  local old_pid boot_bin
-  old_pid=0
-  if [ -f "$AUTORESTORE_WORKER_PID_FILE" ]; then
-    old_pid="$(cat "$AUTORESTORE_WORKER_PID_FILE" 2>/dev/null | tr -dc '0-9')"
-  fi
-  [ -z "$old_pid" ] && old_pid=0
-  if [ "$old_pid" -gt 0 ] && kill -0 "$old_pid" >/dev/null 2>&1; then
+  local boot_bin
+  if autorestore_worker_running; then
     return 0
   fi
 
@@ -4086,6 +4094,7 @@ watchdog_loop() {
   local heartbeat_last_ts=0
   local keepalive_last_ts=0
   local keepalive_recover_last_ts=0
+  local autorestore_skip_logged=0
   local now_ts=0
   local hb_ext_rc=0
   local keepalive_triggered=0
@@ -4127,7 +4136,15 @@ watchdog_loop() {
       fi
       # Keep workspace restore behind core connectivity:
       # SSH/chisel/control must be healthy first, then run restore tasks.
-      run_workspace_autorestore
+      if autorestore_worker_running; then
+        if [ "$autorestore_skip_logged" -eq 0 ]; then
+          install_log "watchdog_autorestore_skip reason=worker_running"
+          autorestore_skip_logged=1
+        fi
+      else
+        autorestore_skip_logged=0
+        run_workspace_autorestore
+      fi
       keepalive_triggered=0
       if [ -f "$KEEPALIVE_TRIGGER_PATH" ]; then
         rm -f "$KEEPALIVE_TRIGGER_PATH" >/dev/null 2>&1 || true
@@ -4497,8 +4514,9 @@ fi
 if [ "$WATCHDOG_MODE" -eq 1 ]; then
   watchdog_loop "$WATCHDOG_INTERVAL_SEC"
 else
+  # Run restore first in background, then let watchdog maintain steady-state.
+  # Watchdog will skip restore while worker is alive to avoid apt/dpkg lock races.
+  start_autorestore_worker_detached || true
   # Keep watchdog running in background for heartbeat/keepalive self-heal.
   start_watchdog_worker_detached || true
-  # Do not block SSH readiness path: run restore in detached worker.
-  start_autorestore_worker_detached || true
 fi
