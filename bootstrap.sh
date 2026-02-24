@@ -60,7 +60,7 @@ WORKSPACE_RECOVER_GLOB="/home/node/*/workspace/.happycapy/happycapy-recover.sh"
 REGISTRY_URL_PATH="${HAPPYCAPY_REGISTRY_URL_PATH:-${PERSIST_DIR}/registry_url.txt}"
 CONTROL_PORT="${HAPPYCAPY_CONTROL_PORT:-18080}"
 CONTROL_API_SCRIPT="${PERSIST_DIR}/happycapy-control-api.js"
-CONTROL_API_SCRIPT_VERSION_MARKER="happycapy-control-api-version: 2026-02-24-soft-recover-v2"
+CONTROL_API_SCRIPT_VERSION_MARKER="happycapy-control-api-version: 2026-02-24-observability-v1"
 CONTROL_API_PID_FILE="${PERSIST_DIR}/happycapy-control-api.pid"
 CONTROL_API_URL_PATH="${HAPPYCAPY_CONTROL_API_URL_PATH:-${PERSIST_DIR}/control_api_url.txt}"
 HEARTBEAT_URL_PATH="${HAPPYCAPY_HEARTBEAT_URL_PATH:-${PERSIST_DIR}/heartbeat_url.txt}"
@@ -71,6 +71,8 @@ KEEPALIVE_PAGE_PATH="${HAPPYCAPY_KEEPALIVE_PAGE_PATH:-${PERSIST_DIR}/vnc-keeper-
 KEEPALIVE_TRIGGER_PATH="${HAPPYCAPY_KEEPALIVE_TRIGGER_PATH:-${PERSIST_DIR}/vnc-keeper-trigger.txt}"
 KEEPALIVE_BROWSER_LOG="${HAPPYCAPY_KEEPALIVE_BROWSER_LOG:-/tmp/happycapy-vnc-browser.log}"
 KEEPALIVE_LOG_PATH="${HAPPYCAPY_KEEPALIVE_LOG_PATH:-/tmp/happycapy-vnc-keepalive.log}"
+INSTALL_AUDIT_LOG_PATH="${HAPPYCAPY_INSTALL_AUDIT_LOG_PATH:-/tmp/happycapy-install-audit.log}"
+PROCESS_AUDIT_LOG_PATH="${HAPPYCAPY_PROCESS_AUDIT_LOG_PATH:-/tmp/happycapy-process-audit.log}"
 KEEPALIVE_STATE_PATH="${HAPPYCAPY_KEEPALIVE_STATE_PATH:-${PERSIST_DIR}/vnc-keeper-state.env}"
 AUTORESTORE_ENV_FILE="${HAPPYCAPY_AUTORESTORE_ENV_FILE:-${PERSIST_DIR}/autorestore.env}"
 EXTERNAL_RECOVER_URL="${HAPPYCAPY_EXTERNAL_RECOVER_URL:-}"
@@ -357,6 +359,16 @@ heartbeat_log() {
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >> "$HEARTBEAT_LOG_PATH" 2>/dev/null || true
 }
 
+install_log() {
+  local msg="$1"
+  printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >> "$INSTALL_AUDIT_LOG_PATH" 2>/dev/null || true
+}
+
+process_log() {
+  local msg="$1"
+  printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >> "$PROCESS_AUDIT_LOG_PATH" 2>/dev/null || true
+}
+
 control_api_external_heartbeat() {
   local source="${1:-watchdog-external}"
   local control_url body
@@ -383,6 +395,71 @@ control_api_external_heartbeat() {
 keepalive_log() {
   local msg="$1"
   printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg" >> "$KEEPALIVE_LOG_PATH" 2>/dev/null || true
+}
+
+process_count_by_pattern() {
+  local pattern="$1"
+  ps -eo args= 2>/dev/null | grep -E "$pattern" | grep -Ev 'grep -E' | wc -l | tr -d ' '
+}
+
+short_cmdline_for_pid() {
+  local pid="$1"
+  local cmdline
+  case "$pid" in
+    ''|*[!0-9]*)
+      printf '%s\n' ""
+      return 0
+      ;;
+  esac
+  if [ "$pid" -le 0 ] 2>/dev/null; then
+    printf '%s\n' ""
+    return 0
+  fi
+  cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  cmdline="$(printf '%s' "$cmdline" | tr '\r\n' ' ' | sed -E 's/[[:space:]]+/ /g' | sed -E 's/^ //; s/ $//')"
+  printf '%s\n' "$(printf '%s' "$cmdline" | cut -c1-320)"
+}
+
+keepalive_process_snapshot() {
+  local stage="$1"
+  local detail="${2:-}"
+  local browser_pid browser_alive browser_cmd
+  local p_ssh p_8080 p_ctl p_6080 p_5901
+  local sshd_count chisel_count ctl_count browser_count
+  local display_now visible_now
+  browser_pid=0
+  if [ -f "$KEEPALIVE_PID_FILE" ]; then
+    browser_pid="$(cat "$KEEPALIVE_PID_FILE" 2>/dev/null | tr -dc '0-9')"
+  fi
+  [ -z "$browser_pid" ] && browser_pid=0
+  browser_alive=0
+  if [ "$browser_pid" -gt 0 ] 2>/dev/null && kill -0 "$browser_pid" >/dev/null 2>&1; then
+    browser_alive=1
+  fi
+  browser_cmd="$(short_cmdline_for_pid "$browser_pid")"
+  p_ssh=0
+  p_8080=0
+  p_ctl=0
+  p_6080=0
+  p_5901=0
+  if is_port_listening "$SSH_PORT"; then p_ssh=1; fi
+  if is_port_listening 8080; then p_8080=1; fi
+  if is_port_listening "$CONTROL_PORT"; then p_ctl=1; fi
+  if is_port_listening 6080; then p_6080=1; fi
+  if is_port_listening 5901; then p_5901=1; fi
+  sshd_count="$(process_count_by_pattern "[s]shd( |$|.*-p ${SSH_PORT})")"
+  chisel_count="$(process_count_by_pattern "[c]hisel server .*--port 8080")"
+  ctl_count="$(process_count_by_pattern "[n]ode .*happycapy-control-api.js")"
+  browser_count="$(process_count_by_pattern "chromium|chromium-browser|google-chrome|google-chrome-stable|firefox")"
+  display_now="$KEEPALIVE_DISPLAY"
+  visible_now="$(keepalive_desired_visible)"
+  keepalive_state_set last_process_snapshot_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  keepalive_state_set last_process_snapshot_stage "$stage"
+  keepalive_state_set last_process_snapshot_detail "$detail"
+  keepalive_state_set last_process_snapshot_browser_pid "$browser_pid"
+  keepalive_state_set last_process_snapshot_browser_alive "$browser_alive"
+  keepalive_state_set last_process_snapshot_browser_cmd "$browser_cmd"
+  process_log "stage=${stage} detail=${detail} ssh_port=${SSH_PORT} ports{ssh=${p_ssh},chisel=${p_8080},control=${p_ctl},novnc=${p_6080},vnc=${p_5901}} procs{sshd=${sshd_count},chisel=${chisel_count},control=${ctl_count},browser=${browser_count}} keepalive{pid=${browser_pid},alive=${browser_alive},display=${display_now},visible_desired=${visible_now}} cmd=\"${browser_cmd}\""
 }
 
 keepalive_state_set() {
@@ -514,6 +591,9 @@ keepalive_state_mark_refresh() {
   keepalive_state_set browser_visible "$visible_now"
   keepalive_state_set display "$KEEPALIVE_DISPLAY"
   keepalive_state_set workspace "$KEEPALIVE_WORKSPACE"
+  keepalive_state_set last_refresh_url "$url"
+  keepalive_log "vnc_browser_refresh_record action=${action} ok=${ok} url=${url}"
+  keepalive_process_snapshot "refresh_${action}" "ok=${ok} url=${url}" || true
 }
 
 keepalive_state_mark_tick() {
@@ -1097,13 +1177,22 @@ visible_vnc_window_reload() {
 
 verify_vnc_browser_refresh_health() {
   local vnc_url="$1"
-  local browser_bin tab_rc content_rc
+  local browser_bin tab_rc content_rc now url_b64
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  url_b64="$(printf '%s' "$vnc_url" | base64 | tr -d '\n' 2>/dev/null || true)"
+  keepalive_state_set last_health_probe_at "$now"
+  keepalive_state_set last_health_probe_url_b64 "$url_b64"
+  keepalive_state_set last_health_probe_url "$vnc_url"
   browser_bin="$(find_browser_bin || true)"
   if [ -n "$browser_bin" ]; then
     vnc_browser_tab_state "$browser_bin" "$vnc_url"
     tab_rc=$?
     case "$tab_rc" in
       0)
+        keepalive_state_set last_health_probe_ok 1
+        keepalive_state_set last_health_probe_mode tab_state
+        keepalive_state_set last_health_probe_reason healthy_tab
+        keepalive_log "vnc_browser_health_ok mode=tab_state browser=$(basename "$browser_bin") url=${vnc_url}"
         return 0
         ;;
       2)
@@ -1111,14 +1200,44 @@ verify_vnc_browser_refresh_health() {
         vnc_browser_content_state "$vnc_url"
         content_rc=$?
         if [ "$content_rc" -eq 0 ]; then
+          keepalive_state_set last_health_probe_ok 1
+          keepalive_state_set last_health_probe_mode dom_content
+          keepalive_state_set last_health_probe_reason healthy_dom
+          keepalive_log "vnc_browser_health_ok mode=dom_content browser=$(basename "$browser_bin") url=${vnc_url}"
           return 0
         fi
         if [ "$content_rc" -eq 1 ]; then
+          keepalive_state_set last_health_probe_ok 0
+          keepalive_state_set last_health_probe_mode dom_content
+          keepalive_state_set last_health_probe_reason crash_or_error_page
           keepalive_log "vnc_browser_dom_unhealthy url=${vnc_url}"
+          keepalive_process_snapshot "health_dom_unhealthy" "url=${vnc_url}" || true
+          return 1
         fi
+        keepalive_state_set last_health_probe_ok 0
+        keepalive_state_set last_health_probe_mode dom_content
+        keepalive_state_set last_health_probe_reason dom_probe_unavailable
+        keepalive_log "vnc_browser_dom_probe_unavailable url=${vnc_url}"
+        break
+        ;;
+      1)
+        keepalive_state_set last_health_probe_ok 0
+        keepalive_state_set last_health_probe_mode tab_state
+        keepalive_state_set last_health_probe_reason error_tab_detected
+        keepalive_log "vnc_browser_health_bad mode=tab_state browser=$(basename "$browser_bin") url=${vnc_url}"
+        keepalive_process_snapshot "health_tab_bad" "url=${vnc_url}" || true
+        return 1
         ;;
     esac
+  else
+    keepalive_state_set last_health_probe_ok 0
+    keepalive_state_set last_health_probe_mode none
+    keepalive_state_set last_health_probe_reason no_browser_bin
+    keepalive_log "vnc_browser_health_skip reason=no_browser_bin url=${vnc_url}"
   fi
+  keepalive_state_set last_health_probe_ok 0
+  keepalive_state_set last_health_probe_mode unknown
+  keepalive_state_set last_health_probe_reason wait_next_tick
   if [ "$KEEPALIVE_INTERVAL_SEC" -gt 0 ]; then
     keepalive_log "vnc_browser_health_unready action=wait_next_tick interval_sec=${KEEPALIVE_INTERVAL_SEC} url=${vnc_url}"
   else
@@ -1505,6 +1624,7 @@ vnc_browser_keepalive_tick() {
   fi
   if [ -z "$vnc_base" ]; then
     keepalive_log "vnc_browser_skip reason=no_vnc_url"
+    keepalive_process_snapshot "tick_skip_no_vnc_url" "current_url=${current_url}" || true
     return 1
   fi
   vnc_page="$(keepalive_vnc_page)"
@@ -1512,8 +1632,10 @@ vnc_browser_keepalive_tick() {
   browser_bin="$(find_browser_bin || true)"
   if [ -z "$browser_bin" ]; then
     keepalive_log "vnc_browser_skip reason=no_browser_bin"
+    keepalive_process_snapshot "tick_skip_no_browser" "url=${vnc_url}" || true
     return 1
   fi
+  keepalive_process_snapshot "tick_enter" "pid=${current_pid} url=${vnc_url}" || true
   keepalive_state_mark_tick "$vnc_url"
   desired_visible="$(keepalive_desired_visible)"
   current_headless=0
@@ -1538,32 +1660,38 @@ vnc_browser_keepalive_tick() {
       if [ "$desired_visible" -eq 1 ]; then
         ensure_keepalive_window_workspace "$current_pid" || true
       fi
-      if [ "$KEEPALIVE_FORCE_REFRESH" -eq 1 ]; then
+        if [ "$KEEPALIVE_FORCE_REFRESH" -eq 1 ]; then
         if [ "$current_headless" -eq 1 ]; then
           if reload_vnc_browser_keepalive_url "$browser_bin" "$vnc_url" && verify_vnc_browser_refresh_health "$vnc_url"; then
             keepalive_state_mark_refresh "headless_cdp_reload" "$vnc_url" 1
             keepalive_log "vnc_browser_force_refresh_ok pid=${current_pid} browser=$(basename "$browser_bin") mode=headless_cdp_reload url=${vnc_url}"
+            keepalive_process_snapshot "tick_force_refresh_ok_headless" "pid=${current_pid} url=${vnc_url}" || true
             return 0
           fi
           keepalive_state_mark_refresh "headless_refresh_failed" "$vnc_url" 0
           keepalive_log "vnc_browser_force_refresh_failed pid=${current_pid} browser=$(basename "$browser_bin") mode=headless_cdp_reload url=${vnc_url}"
+          keepalive_process_snapshot "tick_force_refresh_fail_headless" "pid=${current_pid} url=${vnc_url}" || true
           return 1
         fi
         if visible_vnc_window_reload "$vnc_url"; then
+          keepalive_process_snapshot "tick_force_refresh_ok_visible" "pid=${current_pid} url=${vnc_url}" || true
           return 0
         fi
         # Try one tab/url rehydrate before declaring failure.
         if reload_vnc_browser_keepalive_url "$browser_bin" "$vnc_url"; then
           if visible_vnc_window_reload "$vnc_url"; then
             keepalive_log "vnc_browser_force_refresh_recovered pid=${current_pid} browser=$(basename "$browser_bin") mode=visible_only url=${vnc_url}"
+            keepalive_process_snapshot "tick_force_refresh_recovered_visible" "pid=${current_pid} url=${vnc_url}" || true
             return 0
           fi
         fi
         keepalive_state_mark_refresh "visible_refresh_failed" "$vnc_url" 0
         keepalive_log "vnc_browser_force_refresh_failed pid=${current_pid} browser=$(basename "$browser_bin") mode=visible_only url=${vnc_url}"
+        keepalive_process_snapshot "tick_force_refresh_fail_visible" "pid=${current_pid} url=${vnc_url}" || true
         return 1
       fi
       keepalive_log "vnc_browser_alive pid=${current_pid} browser=$(basename "$browser_bin") url=${vnc_url}"
+      keepalive_process_snapshot "tick_alive" "pid=${current_pid} url=${vnc_url}" || true
       return 0
     fi
     if reload_vnc_browser_keepalive_url "$browser_bin" "$vnc_url"; then
@@ -1572,13 +1700,20 @@ vnc_browser_keepalive_tick() {
         visible_vnc_window_reload "$vnc_url" || true
       fi
       keepalive_log "vnc_browser_reload_applied pid=${current_pid} browser=$(basename "$browser_bin") url=${vnc_url}"
+      keepalive_process_snapshot "tick_reload_applied" "pid=${current_pid} url=${vnc_url}" || true
       return 0
     fi
     keepalive_log "vnc_browser_reload_failed pid=${current_pid} browser=$(basename "$browser_bin") action=no_restart_wait_next_tick url=${vnc_url}"
+    keepalive_process_snapshot "tick_reload_failed" "pid=${current_pid} url=${vnc_url}" || true
     return 1
   fi
   stop_keepalive_browser
-  start_vnc_browser_keepalive "$browser_bin" "$vnc_url"
+  if start_vnc_browser_keepalive "$browser_bin" "$vnc_url"; then
+    keepalive_process_snapshot "tick_launch_ok" "url=${vnc_url}" || true
+    return 0
+  fi
+  keepalive_process_snapshot "tick_launch_failed" "url=${vnc_url}" || true
+  return 1
 }
 
 with_retry() {
@@ -1644,18 +1779,38 @@ chisel_state() {
 }
 
 install_packages() {
+  local rc_update rc_install
   if ! can_root; then
+    install_log "core_install_skip reason=no_root"
     return 0
   fi
 
   if command -v apt-get >/dev/null 2>&1; then
-    with_retry 2 run_root apt-get update -y >/tmp/hc-apt-update.log 2>&1 || true
+    install_log "core_install_start manager=apt"
+    set +e
+    with_retry 2 run_root apt-get update -y >/tmp/hc-apt-update.log 2>&1
+    rc_update=$?
     with_retry 2 run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-      curl ca-certificates gzip openssh-server supervisor nodejs >/tmp/hc-apt-install.log 2>&1 || true
+      curl ca-certificates gzip openssh-server supervisor nodejs >/tmp/hc-apt-install.log 2>&1
+    rc_install=$?
+    set -e
+    install_log "core_install_end manager=apt rc_update=${rc_update} rc_install=${rc_install} update_log=/tmp/hc-apt-update.log install_log=/tmp/hc-apt-install.log"
   elif command -v apk >/dev/null 2>&1; then
-    with_retry 2 run_root apk add --no-cache curl gzip openssh supervisor nodejs >/tmp/hc-apk-install.log 2>&1 || true
+    install_log "core_install_start manager=apk"
+    set +e
+    with_retry 2 run_root apk add --no-cache curl gzip openssh supervisor nodejs >/tmp/hc-apk-install.log 2>&1
+    rc_install=$?
+    set -e
+    install_log "core_install_end manager=apk rc_install=${rc_install} install_log=/tmp/hc-apk-install.log"
   elif command -v yum >/dev/null 2>&1; then
-    with_retry 2 run_root yum install -y curl gzip openssh-server supervisor nodejs >/tmp/hc-yum-install.log 2>&1 || true
+    install_log "core_install_start manager=yum"
+    set +e
+    with_retry 2 run_root yum install -y curl gzip openssh-server supervisor nodejs >/tmp/hc-yum-install.log 2>&1
+    rc_install=$?
+    set -e
+    install_log "core_install_end manager=yum rc_install=${rc_install} install_log=/tmp/hc-yum-install.log"
+  else
+    install_log "core_install_skip reason=unsupported_package_manager"
   fi
 }
 
@@ -1736,57 +1891,116 @@ ensure_autorestore_docker() {
 
 ensure_autorestore_browser() {
   local browser="$AUTORESTORE_BROWSER"
+  local rc_update rc_install
+  rc_update=0
+  rc_install=0
   [ -n "$browser" ] || return 0
   [ "$browser" != "auto" ] || browser="chromium"
   case "$browser" in
     chromium)
       if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+        install_log "browser_dep_check rc=0 browser=chromium reason=already_present"
         return 0
       fi
       ;;
     firefox)
       if command -v firefox >/dev/null 2>&1; then
+        install_log "browser_dep_check rc=0 browser=firefox reason=already_present"
         return 0
       fi
       ;;
     chrome)
       if command -v google-chrome >/dev/null 2>&1 || command -v google-chrome-stable >/dev/null 2>&1; then
+        install_log "browser_dep_check rc=0 browser=chrome reason=already_present"
         return 0
       fi
       ;;
   esac
+  install_log "browser_dep_check rc=1 browser=${browser} reason=missing_binary"
   if ! can_root; then
     keepalive_log "autorestore_browser_missing reason=no_root browser=${browser}"
+    install_log "browser_dep_install_skip browser=${browser} reason=no_root"
     return 1
   fi
 
   case "$browser" in
     chromium)
       if command -v apt-get >/dev/null 2>&1; then
-        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1 || true
-        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium >>/tmp/hc-autorestore-browser-install.log 2>&1 || run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium-browser >>/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        install_log "browser_dep_install_start browser=chromium manager=apt log=/tmp/hc-autorestore-browser-install.log"
+        set +e
+        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_update=$?
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium >>/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_install=$?
+        if [ "$rc_install" -ne 0 ]; then
+          run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y chromium-browser >>/tmp/hc-autorestore-browser-install.log 2>&1
+          rc_install=$?
+        fi
+        set -e
+        install_log "browser_dep_install_end browser=chromium manager=apt rc_update=${rc_update} rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
       elif command -v apk >/dev/null 2>&1; then
-        run_root apk add --no-cache chromium >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        install_log "browser_dep_install_start browser=chromium manager=apk log=/tmp/hc-autorestore-browser-install.log"
+        set +e
+        run_root apk add --no-cache chromium >/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_install=$?
+        set -e
+        install_log "browser_dep_install_end browser=chromium manager=apk rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
       elif command -v yum >/dev/null 2>&1; then
-        run_root yum install -y chromium >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        install_log "browser_dep_install_start browser=chromium manager=yum log=/tmp/hc-autorestore-browser-install.log"
+        set +e
+        run_root yum install -y chromium >/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_install=$?
+        set -e
+        install_log "browser_dep_install_end browser=chromium manager=yum rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
       fi
       ;;
     firefox)
       if command -v apt-get >/dev/null 2>&1; then
-        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1 || true
-        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y firefox-esr >>/tmp/hc-autorestore-browser-install.log 2>&1 || run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y firefox >>/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        install_log "browser_dep_install_start browser=firefox manager=apt log=/tmp/hc-autorestore-browser-install.log"
+        set +e
+        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_update=$?
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y firefox-esr >>/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_install=$?
+        if [ "$rc_install" -ne 0 ]; then
+          run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y firefox >>/tmp/hc-autorestore-browser-install.log 2>&1
+          rc_install=$?
+        fi
+        set -e
+        install_log "browser_dep_install_end browser=firefox manager=apt rc_update=${rc_update} rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
       elif command -v apk >/dev/null 2>&1; then
-        run_root apk add --no-cache firefox >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        install_log "browser_dep_install_start browser=firefox manager=apk log=/tmp/hc-autorestore-browser-install.log"
+        set +e
+        run_root apk add --no-cache firefox >/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_install=$?
+        set -e
+        install_log "browser_dep_install_end browser=firefox manager=apk rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
       elif command -v yum >/dev/null 2>&1; then
-        run_root yum install -y firefox >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        install_log "browser_dep_install_start browser=firefox manager=yum log=/tmp/hc-autorestore-browser-install.log"
+        set +e
+        run_root yum install -y firefox >/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_install=$?
+        set -e
+        install_log "browser_dep_install_end browser=firefox manager=yum rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
       fi
       ;;
     chrome)
       if command -v apt-get >/dev/null 2>&1; then
-        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1 || true
-        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable >>/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        install_log "browser_dep_install_start browser=chrome manager=apt log=/tmp/hc-autorestore-browser-install.log"
+        set +e
+        run_root apt-get update -y >/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_update=$?
+        run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y google-chrome-stable >>/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_install=$?
+        set -e
+        install_log "browser_dep_install_end browser=chrome manager=apt rc_update=${rc_update} rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
       elif command -v yum >/dev/null 2>&1; then
-        run_root yum install -y google-chrome-stable >/tmp/hc-autorestore-browser-install.log 2>&1 || true
+        install_log "browser_dep_install_start browser=chrome manager=yum log=/tmp/hc-autorestore-browser-install.log"
+        set +e
+        run_root yum install -y google-chrome-stable >/tmp/hc-autorestore-browser-install.log 2>&1
+        rc_install=$?
+        set -e
+        install_log "browser_dep_install_end browser=chrome manager=yum rc_install=${rc_install} log=/tmp/hc-autorestore-browser-install.log"
       fi
       ;;
   esac
@@ -1795,61 +2009,120 @@ ensure_autorestore_browser() {
     chromium)
       if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
         keepalive_log "autorestore_browser_missing browser=chromium"
+        install_log "browser_dep_install_verify rc=1 browser=chromium"
         return 1
       fi
       ;;
     firefox)
       if ! command -v firefox >/dev/null 2>&1; then
         keepalive_log "autorestore_browser_missing browser=firefox"
+        install_log "browser_dep_install_verify rc=1 browser=firefox"
         return 1
       fi
       ;;
     chrome)
       if ! command -v google-chrome >/dev/null 2>&1 && ! command -v google-chrome-stable >/dev/null 2>&1; then
         keepalive_log "autorestore_browser_missing browser=chrome"
+        install_log "browser_dep_install_verify rc=1 browser=chrome"
         return 1
       fi
       ;;
   esac
+  install_log "browser_dep_install_verify rc=0 browser=${browser}"
   return 0
 }
 
 ensure_autorestore_desktop_packages() {
+  local missing need_window_tools rc
   [ "$AUTORESTORE_DESKTOP" -eq 1 ] || return 0
-  if command -v Xvfb >/dev/null 2>&1 && command -v x11vnc >/dev/null 2>&1; then
-    if command -v websockify >/dev/null 2>&1 || command -v novnc_proxy >/dev/null 2>&1; then
-      return 0
-    fi
+  missing=""
+  need_window_tools=0
+  if [ "$KEEPALIVE_MODE" = "vnc-browser" ]; then
+    need_window_tools=1
   fi
+  if ! command -v Xvfb >/dev/null 2>&1; then missing="${missing} Xvfb"; fi
+  if ! command -v x11vnc >/dev/null 2>&1; then missing="${missing} x11vnc"; fi
+  if ! command -v websockify >/dev/null 2>&1 && ! command -v novnc_proxy >/dev/null 2>&1; then
+    missing="${missing} websockify_or_novnc_proxy"
+  fi
+  if [ "$need_window_tools" -eq 1 ]; then
+    if ! command -v xdotool >/dev/null 2>&1; then missing="${missing} xdotool"; fi
+    if ! command -v wmctrl >/dev/null 2>&1; then missing="${missing} wmctrl"; fi
+  fi
+  missing="$(printf '%s' "$missing" | sed -E 's/^ +//; s/ +/ /g')"
+  if [ -z "$missing" ]; then
+    install_log "desktop_dep_check rc=0 keepalive_mode=${KEEPALIVE_MODE} missing=none"
+    return 0
+  fi
+  install_log "desktop_dep_check rc=1 keepalive_mode=${KEEPALIVE_MODE} missing=${missing}"
   if ! can_root; then
-    keepalive_log "autorestore_desktop_missing reason=no_root"
+    keepalive_log "autorestore_desktop_missing reason=no_root missing=${missing}"
+    install_log "desktop_dep_install_skip reason=no_root missing=${missing}"
     return 1
   fi
+  rc=0
   if command -v apt-get >/dev/null 2>&1; then
-    run_root apt-get update -y >/tmp/hc-autorestore-desktop-install.log 2>&1 || true
-    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb x11vnc novnc websockify xdotool wmctrl >>/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    install_log "desktop_dep_install_start manager=apt missing=${missing} log=/tmp/hc-autorestore-desktop-install.log"
+    set +e
+    run_root apt-get update -y >/tmp/hc-autorestore-desktop-install.log 2>&1
+    rc=$?
+    run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y xvfb x11vnc novnc websockify xdotool wmctrl >>/tmp/hc-autorestore-desktop-install.log 2>&1
+    rc=$((rc + $?))
+    set -e
+    install_log "desktop_dep_install_end manager=apt rc=${rc} log=/tmp/hc-autorestore-desktop-install.log"
     if [ "$AUTORESTORE_DESKTOP_ENV" -eq 1 ]; then
-      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+      set +e
+      run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1
+      rc=$?
+      set -e
+      install_log "desktop_env_install_end manager=apt rc=${rc} log=/tmp/hc-autorestore-desktop-install.log"
     fi
   elif command -v apk >/dev/null 2>&1; then
-    run_root apk add --no-cache xvfb x11vnc novnc websockify xdotool wmctrl >/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    install_log "desktop_dep_install_start manager=apk missing=${missing} log=/tmp/hc-autorestore-desktop-install.log"
+    set +e
+    run_root apk add --no-cache xvfb x11vnc novnc websockify xdotool wmctrl >/tmp/hc-autorestore-desktop-install.log 2>&1
+    rc=$?
+    set -e
+    install_log "desktop_dep_install_end manager=apk rc=${rc} log=/tmp/hc-autorestore-desktop-install.log"
     if [ "$AUTORESTORE_DESKTOP_ENV" -eq 1 ]; then
-      run_root apk add --no-cache openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+      set +e
+      run_root apk add --no-cache openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1
+      rc=$?
+      set -e
+      install_log "desktop_env_install_end manager=apk rc=${rc} log=/tmp/hc-autorestore-desktop-install.log"
     fi
   elif command -v yum >/dev/null 2>&1; then
-    run_root yum install -y xorg-x11-server-Xvfb x11vnc novnc python3-websockify xdotool wmctrl >/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+    install_log "desktop_dep_install_start manager=yum missing=${missing} log=/tmp/hc-autorestore-desktop-install.log"
+    set +e
+    run_root yum install -y xorg-x11-server-Xvfb x11vnc novnc python3-websockify xdotool wmctrl >/tmp/hc-autorestore-desktop-install.log 2>&1
+    rc=$?
+    set -e
+    install_log "desktop_dep_install_end manager=yum rc=${rc} log=/tmp/hc-autorestore-desktop-install.log"
     if [ "$AUTORESTORE_DESKTOP_ENV" -eq 1 ]; then
-      run_root yum install -y openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1 || true
+      set +e
+      run_root yum install -y openbox xterm >>/tmp/hc-autorestore-desktop-install.log 2>&1
+      rc=$?
+      set -e
+      install_log "desktop_env_install_end manager=yum rc=${rc} log=/tmp/hc-autorestore-desktop-install.log"
     fi
   fi
-  if ! command -v Xvfb >/dev/null 2>&1 || ! command -v x11vnc >/dev/null 2>&1; then
-    keepalive_log "autorestore_desktop_missing reason=missing_xvfb_or_x11vnc"
-    return 1
-  fi
+  missing=""
+  if ! command -v Xvfb >/dev/null 2>&1; then missing="${missing} Xvfb"; fi
+  if ! command -v x11vnc >/dev/null 2>&1; then missing="${missing} x11vnc"; fi
   if ! command -v websockify >/dev/null 2>&1 && ! command -v novnc_proxy >/dev/null 2>&1; then
-    keepalive_log "autorestore_desktop_missing reason=missing_websockify"
+    missing="${missing} websockify_or_novnc_proxy"
+  fi
+  if [ "$need_window_tools" -eq 1 ]; then
+    if ! command -v xdotool >/dev/null 2>&1; then missing="${missing} xdotool"; fi
+    if ! command -v wmctrl >/dev/null 2>&1; then missing="${missing} wmctrl"; fi
+  fi
+  missing="$(printf '%s' "$missing" | sed -E 's/^ +//; s/ +/ /g')"
+  if [ -n "$missing" ]; then
+    keepalive_log "autorestore_desktop_missing reason=missing_desktop_tools missing=${missing}"
+    install_log "desktop_dep_install_verify rc=1 missing=${missing}"
     return 1
   fi
+  install_log "desktop_dep_install_verify rc=0 missing=none keepalive_mode=${KEEPALIVE_MODE}"
   return 0
 }
 
@@ -2085,6 +2358,7 @@ run_external_recover_url_once() {
 }
 
 run_workspace_autorestore() {
+  install_log "autorestore_begin mode=${KEEPALIVE_MODE}"
   load_autorestore_preferences
   ensure_autorestore_docker || true
   ensure_autorestore_browser || keepalive_log "autorestore_browser_prepare_failed target=${AUTORESTORE_BROWSER:-none}"
@@ -2095,6 +2369,8 @@ run_workspace_autorestore() {
   fi
   restore_custom_recover_tasks || true
   run_external_recover_url_once || true
+  keepalive_process_snapshot "autorestore_end" "mode=${KEEPALIVE_MODE}" || true
+  install_log "autorestore_end mode=${KEEPALIVE_MODE}"
 }
 
 start_autorestore_worker_detached() {
@@ -2381,7 +2657,7 @@ write_control_api_server() {
   mkdir -p "$PERSIST_DIR"
   cat > "$CONTROL_API_SCRIPT" <<'EOF2'
 #!/usr/bin/env node
-// happycapy-control-api-version: 2026-02-24-soft-recover-v2
+// happycapy-control-api-version: 2026-02-24-observability-v1
 const http = require("http");
 const fs = require("fs");
 const { spawnSync, spawn } = require("child_process");
@@ -2416,6 +2692,8 @@ const cfg = {
   keepaliveLogPath: process.env.HAPPYCAPY_KEEPALIVE_LOG_PATH || "",
   keepaliveBrowserLogPath: process.env.HAPPYCAPY_KEEPALIVE_BROWSER_LOG || "",
   keepaliveStatePath: process.env.HAPPYCAPY_KEEPALIVE_STATE_PATH || "",
+  installAuditLogPath: process.env.HAPPYCAPY_INSTALL_AUDIT_LOG_PATH || "/tmp/happycapy-install-audit.log",
+  processAuditLogPath: process.env.HAPPYCAPY_PROCESS_AUDIT_LOG_PATH || "/tmp/happycapy-process-audit.log",
   keepaliveForceRefresh: ["1", "true", "yes", "on"].includes(
     String(process.env.HAPPYCAPY_KEEPALIVE_FORCE_REFRESH || "1").toLowerCase()
   ),
@@ -2815,6 +3093,8 @@ function keepaliveStatus() {
   const lastRefreshAt = String(state.last_refresh_at || "").trim();
   const lastRefreshMs = Date.parse(lastRefreshAt || "");
   const refreshAgeMs = Number.isFinite(lastRefreshMs) ? (Date.now() - lastRefreshMs) : Number.POSITIVE_INFINITY;
+  const lastHealthProbeAt = String(state.last_health_probe_at || "").trim();
+  const processSnapshotAt = String(state.last_process_snapshot_at || "").trim();
   const activeWindowMs = Math.max(60, intervalSec * 2) * 1000;
   const recentTick = Number.isFinite(lastTickMs) && tickAgeMs <= activeWindowMs;
   const recentRefresh = Number.isFinite(lastRefreshMs) && refreshAgeMs <= activeWindowMs;
@@ -2852,6 +3132,16 @@ function keepaliveStatus() {
     last_refresh_action: String(state.last_refresh_action || "").trim(),
     last_refresh_ok: String(state.last_refresh_ok || "").trim() === "1",
     refresh_count: Number.isFinite(refreshCount) ? Math.max(0, refreshCount) : 0,
+    last_health_probe_at: lastHealthProbeAt,
+    last_health_probe_ok: String(state.last_health_probe_ok || "").trim() === "1",
+    last_health_probe_mode: String(state.last_health_probe_mode || "").trim(),
+    last_health_probe_reason: String(state.last_health_probe_reason || "").trim(),
+    last_process_snapshot_at: processSnapshotAt,
+    last_process_snapshot_stage: String(state.last_process_snapshot_stage || "").trim(),
+    last_process_snapshot_detail: String(state.last_process_snapshot_detail || "").trim(),
+    last_process_snapshot_browser_pid: Number.parseInt(String(state.last_process_snapshot_browser_pid || "0"), 10) || 0,
+    last_process_snapshot_browser_alive: String(state.last_process_snapshot_browser_alive || "").trim() === "1",
+    last_process_snapshot_browser_cmd: String(state.last_process_snapshot_browser_cmd || "").trim(),
     state_path: cfg.keepaliveStatePath || "",
     pid_file: cfg.keepalivePidFile || "",
     log_path: cfg.keepaliveLogPath || "",
@@ -3118,6 +3408,12 @@ function collectStatus(refresh) {
     last_heartbeat_source: lastHeartbeatSource,
     last_heartbeat_via: lastHeartbeatVia,
     keepalive,
+    diagnostics: {
+      install_audit_log: cfg.installAuditLogPath || "",
+      process_audit_log: cfg.processAuditLogPath || "",
+      keepalive_log: cfg.keepaliveLogPath || "",
+      keepalive_browser_log: cfg.keepaliveBrowserLogPath || "",
+    },
     machine_uptime: machineUptimeHuman(),
     control_api_uptime: controlApiUptimeHuman(),
     ...state,
@@ -3190,6 +3486,14 @@ const server = http.createServer((req, res) => {
         bootstrap_loop: tailFile("/tmp/hc-bootstrap-loop.log", n),
         bootstrap: tailFile("/tmp/hc-bootstrap.log", n),
         recover: tailFile("/tmp/hc-recover-only.log", n),
+        keepalive: tailFile(cfg.keepaliveLogPath, n),
+        keepalive_browser: tailFile(cfg.keepaliveBrowserLogPath, n),
+        install_audit: tailFile(cfg.installAuditLogPath, n),
+        process_audit: tailFile(cfg.processAuditLogPath, n),
+        apt_update: tailFile("/tmp/hc-apt-update.log", n),
+        apt_install: tailFile("/tmp/hc-apt-install.log", n),
+        autorestore_browser_install: tailFile("/tmp/hc-autorestore-browser-install.log", n),
+        autorestore_desktop_install: tailFile("/tmp/hc-autorestore-desktop-install.log", n),
         chisel: tailFile("/tmp/happycapy-chisel.log", n),
         chisel_err: tailFile("/tmp/happycapy-chisel.err.log", n),
         sshd: tailFile("/tmp/happycapy-sshd.log", n),
@@ -3454,7 +3758,7 @@ EOF2
   if [ -n "$CONTROL_API_BIN" ] && [ -x "$CONTROL_API_SCRIPT" ]; then
     cat > /tmp/happycapy-control-api.conf <<EOF2
 [program:happycapy-control-api]
-command=/usr/bin/env HAPPYCAPY_ALIAS=${ALIAS} HAPPYCAPY_ACCESS_TOKEN=${ACCESS_TOKEN} HAPPYCAPY_SSH_PORT=${SSH_PORT} HAPPYCAPY_CONTROL_PORT=${CONTROL_PORT} HAPPYCAPY_RECOVER_SCRIPT=${RECOVER_SCRIPT_PATH} HAPPYCAPY_REGISTRY_WRITER=${writer} HAPPYCAPY_REGISTRY_URL_PATH=${REGISTRY_URL_PATH} HAPPYCAPY_CONTROL_API_URL_PATH=${CONTROL_API_URL_PATH} HAPPYCAPY_HEARTBEAT_URL_PATH=${HEARTBEAT_URL_PATH} HAPPYCAPY_HEARTBEAT_INTERVAL_SEC=${HEARTBEAT_INTERVAL_SEC} HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE=${HEARTBEAT_EXTERNAL_KEEPALIVE} HAPPYCAPY_KEEPALIVE_MODE=${KEEPALIVE_MODE} HAPPYCAPY_KEEPALIVE_INTERVAL_SEC=${KEEPALIVE_INTERVAL_SEC} HAPPYCAPY_KEEPALIVE_BROWSER_VISIBLE=${KEEPALIVE_BROWSER_VISIBLE} HAPPYCAPY_KEEPALIVE_VISIBLE_PATH=${KEEPALIVE_VISIBLE_PATH} HAPPYCAPY_KEEPALIVE_VNC_PAGE=${KEEPALIVE_VNC_PAGE} HAPPYCAPY_KEEPALIVE_PAGE_PATH=${KEEPALIVE_PAGE_PATH} HAPPYCAPY_KEEPALIVE_TRIGGER_PATH=${KEEPALIVE_TRIGGER_PATH} HAPPYCAPY_KEEPALIVE_FORCE_REFRESH=${KEEPALIVE_FORCE_REFRESH} HAPPYCAPY_KEEPALIVE_FORCE_REFRESH_MODE=${KEEPALIVE_FORCE_REFRESH_MODE} HAPPYCAPY_KEEPALIVE_REFRESH_MODE_PATH=${KEEPALIVE_REFRESH_MODE_PATH} HAPPYCAPY_KEEPALIVE_DISPLAY=${KEEPALIVE_DISPLAY} HAPPYCAPY_KEEPALIVE_PID_FILE=${KEEPALIVE_PID_FILE} HAPPYCAPY_KEEPALIVE_URL_PATH=${KEEPALIVE_URL_PATH} HAPPYCAPY_KEEPALIVE_PROFILE_DIR=${KEEPALIVE_PROFILE_DIR} HAPPYCAPY_KEEPALIVE_STATE_PATH=${KEEPALIVE_STATE_PATH} HAPPYCAPY_KEEPALIVE_LOG_PATH=${KEEPALIVE_LOG_PATH} HAPPYCAPY_KEEPALIVE_BROWSER_LOG=${KEEPALIVE_BROWSER_LOG} HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC=${EXPORT_PORT_TIMEOUT_SEC} ${CONTROL_API_BIN} ${CONTROL_API_SCRIPT}
+command=/usr/bin/env HAPPYCAPY_ALIAS=${ALIAS} HAPPYCAPY_ACCESS_TOKEN=${ACCESS_TOKEN} HAPPYCAPY_SSH_PORT=${SSH_PORT} HAPPYCAPY_CONTROL_PORT=${CONTROL_PORT} HAPPYCAPY_RECOVER_SCRIPT=${RECOVER_SCRIPT_PATH} HAPPYCAPY_REGISTRY_WRITER=${writer} HAPPYCAPY_REGISTRY_URL_PATH=${REGISTRY_URL_PATH} HAPPYCAPY_CONTROL_API_URL_PATH=${CONTROL_API_URL_PATH} HAPPYCAPY_HEARTBEAT_URL_PATH=${HEARTBEAT_URL_PATH} HAPPYCAPY_HEARTBEAT_INTERVAL_SEC=${HEARTBEAT_INTERVAL_SEC} HAPPYCAPY_HEARTBEAT_EXTERNAL_KEEPALIVE=${HEARTBEAT_EXTERNAL_KEEPALIVE} HAPPYCAPY_KEEPALIVE_MODE=${KEEPALIVE_MODE} HAPPYCAPY_KEEPALIVE_INTERVAL_SEC=${KEEPALIVE_INTERVAL_SEC} HAPPYCAPY_KEEPALIVE_BROWSER_VISIBLE=${KEEPALIVE_BROWSER_VISIBLE} HAPPYCAPY_KEEPALIVE_VISIBLE_PATH=${KEEPALIVE_VISIBLE_PATH} HAPPYCAPY_KEEPALIVE_VNC_PAGE=${KEEPALIVE_VNC_PAGE} HAPPYCAPY_KEEPALIVE_PAGE_PATH=${KEEPALIVE_PAGE_PATH} HAPPYCAPY_KEEPALIVE_TRIGGER_PATH=${KEEPALIVE_TRIGGER_PATH} HAPPYCAPY_KEEPALIVE_FORCE_REFRESH=${KEEPALIVE_FORCE_REFRESH} HAPPYCAPY_KEEPALIVE_FORCE_REFRESH_MODE=${KEEPALIVE_FORCE_REFRESH_MODE} HAPPYCAPY_KEEPALIVE_REFRESH_MODE_PATH=${KEEPALIVE_REFRESH_MODE_PATH} HAPPYCAPY_KEEPALIVE_DISPLAY=${KEEPALIVE_DISPLAY} HAPPYCAPY_KEEPALIVE_PID_FILE=${KEEPALIVE_PID_FILE} HAPPYCAPY_KEEPALIVE_URL_PATH=${KEEPALIVE_URL_PATH} HAPPYCAPY_KEEPALIVE_PROFILE_DIR=${KEEPALIVE_PROFILE_DIR} HAPPYCAPY_KEEPALIVE_STATE_PATH=${KEEPALIVE_STATE_PATH} HAPPYCAPY_KEEPALIVE_LOG_PATH=${KEEPALIVE_LOG_PATH} HAPPYCAPY_KEEPALIVE_BROWSER_LOG=${KEEPALIVE_BROWSER_LOG} HAPPYCAPY_INSTALL_AUDIT_LOG_PATH=${INSTALL_AUDIT_LOG_PATH} HAPPYCAPY_PROCESS_AUDIT_LOG_PATH=${PROCESS_AUDIT_LOG_PATH} HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC=${EXPORT_PORT_TIMEOUT_SEC} ${CONTROL_API_BIN} ${CONTROL_API_SCRIPT}
 autostart=true
 autorestart=true
 startsecs=2
@@ -3577,6 +3881,8 @@ start_control_api_fallback() {
   HAPPYCAPY_KEEPALIVE_STATE_PATH="$KEEPALIVE_STATE_PATH" \
   HAPPYCAPY_KEEPALIVE_LOG_PATH="$KEEPALIVE_LOG_PATH" \
   HAPPYCAPY_KEEPALIVE_BROWSER_LOG="$KEEPALIVE_BROWSER_LOG" \
+  HAPPYCAPY_INSTALL_AUDIT_LOG_PATH="$INSTALL_AUDIT_LOG_PATH" \
+  HAPPYCAPY_PROCESS_AUDIT_LOG_PATH="$PROCESS_AUDIT_LOG_PATH" \
   HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC="$EXPORT_PORT_TIMEOUT_SEC" \
   nohup "$CONTROL_API_BIN" "$CONTROL_API_SCRIPT" >/tmp/happycapy-control-api.log 2>/tmp/happycapy-control-api.err.log &
   printf '%s\n' "$!" > "$CONTROL_API_PID_FILE"
@@ -3630,6 +3936,7 @@ start_fallback_processes() {
   esac
 
   start_control_api_fallback || true
+  keepalive_process_snapshot "fallback_processes" "chisel_state=$(chisel_state)" || true
 }
 
 query_preview_url_for_port_once() {
@@ -3718,6 +4025,8 @@ export HAPPYCAPY_KEEPALIVE_TRIGGER_PATH="\${HAPPYCAPY_KEEPALIVE_TRIGGER_PATH:-${
 export HAPPYCAPY_KEEPALIVE_STATE_PATH="\${HAPPYCAPY_KEEPALIVE_STATE_PATH:-${KEEPALIVE_STATE_PATH}}"
 export HAPPYCAPY_KEEPALIVE_LOG_PATH="\${HAPPYCAPY_KEEPALIVE_LOG_PATH:-${KEEPALIVE_LOG_PATH}}"
 export HAPPYCAPY_KEEPALIVE_BROWSER_LOG="\${HAPPYCAPY_KEEPALIVE_BROWSER_LOG:-${KEEPALIVE_BROWSER_LOG}}"
+export HAPPYCAPY_INSTALL_AUDIT_LOG_PATH="\${HAPPYCAPY_INSTALL_AUDIT_LOG_PATH:-${INSTALL_AUDIT_LOG_PATH}}"
+export HAPPYCAPY_PROCESS_AUDIT_LOG_PATH="\${HAPPYCAPY_PROCESS_AUDIT_LOG_PATH:-${PROCESS_AUDIT_LOG_PATH}}"
 export HAPPYCAPY_RECOVER_SCRIPT="\${HAPPYCAPY_RECOVER_SCRIPT:-${RECOVER_SCRIPT_PATH}}"
 export HAPPYCAPY_RECOVER_CHAIN=1
 
@@ -3994,9 +4303,11 @@ if ! acquire_bootstrap_lock; then
 fi
 trap 'release_bootstrap_lock' EXIT INT TERM
 converge_bootstrap_singleton || true
+install_log "bootstrap_begin alias=${ALIAS} persist_root=${PERSIST_ROOT} watchdog_mode=${WATCHDOG_MODE} keepalive_mode=${KEEPALIVE_MODE}"
 
 RECOVER_SCRIPT="$(install_recover_script || true)"
 if [ -z "$RECOVER_SCRIPT" ] || [ ! -x "$RECOVER_SCRIPT" ]; then
+  install_log "bootstrap_fail step=install_recover_script"
   emit_error "failed to create recover script"
   exit 1
 fi
@@ -4010,23 +4321,27 @@ fi
 
 CONTROL_API_BIN="$(command -v node || true)"
 if [ -z "$CONTROL_API_BIN" ]; then
+  install_log "bootstrap_fail step=detect_node reason=node_not_found"
   emit_error "node not found (control api unavailable)"
   exit 1
 fi
 
 CHISEL_BIN="$(install_chisel || true)"
 if [ -z "$CHISEL_BIN" ]; then
+  install_log "bootstrap_fail step=install_chisel"
   emit_error "failed to install/find chisel"
   exit 1
 fi
 
 if ! configure_sshd; then
+  install_log "bootstrap_fail step=configure_sshd"
   emit_error "failed to install/configure sshd"
   exit 1
 fi
 
 BOOT_WRITER="$(write_reporter || true)"
 if [ -z "$BOOT_WRITER" ] || [ ! -x "$BOOT_WRITER" ]; then
+  install_log "bootstrap_fail step=write_reporter"
   emit_error "failed to create registry writer"
   exit 1
 fi
@@ -4034,6 +4349,7 @@ fi
 if [ -n "$CONTROL_API_BIN" ]; then
   write_control_api_server >/dev/null 2>&1 || true
   if ! ensure_control_api_script; then
+    install_log "bootstrap_fail step=ensure_control_api_script"
     emit_error "failed to build/validate control api script"
     exit 1
   fi
@@ -4041,6 +4357,7 @@ fi
 if [ -x "$CONTROL_API_SCRIPT" ]; then
   CONTROL_API_REQUIRED=1
 else
+  install_log "bootstrap_fail step=write_control_api_server"
   emit_error "failed to create control api server script"
   exit 1
 fi
@@ -4137,9 +4454,11 @@ while [ "$HEAL_ROUND" -le "$HEAL_MAX_ROUNDS" ]; do
 done
 
 if [ "$HEAL_OK" -ne 1 ]; then
+  install_log "bootstrap_fail step=${HEAL_LAST_STEP} detail=${HEAL_LAST_ERR}"
   emit_error "heal_loop_exhausted step=${HEAL_LAST_STEP} detail=${HEAL_LAST_ERR}"
   exit 1
 fi
+install_log "bootstrap_core_ready round=${HEAL_ROUND} chisel_server=${CHISEL_SERVER}"
 
 if [ "$OUTPUT_MODE" = "short" ]; then
   printf '{"status":"ok","chisel_server":"%s","control_api_url":"%s","heartbeat_url":"%s","recover_script":"%s","round":%s}\n' \
