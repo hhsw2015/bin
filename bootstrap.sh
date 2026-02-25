@@ -1451,6 +1451,25 @@ verify_vnc_browser_refresh_health() {
     tab_rc=$?
     case "$tab_rc" in
       0)
+        # Tab metadata may still look normal when noVNC is showing a
+        # disconnected overlay. Prefer DOM verdict when available.
+        vnc_browser_content_state "$vnc_url"
+        content_rc=$?
+        if [ "$content_rc" -eq 1 ]; then
+          keepalive_state_set last_health_probe_ok 0
+          keepalive_state_set last_health_probe_mode dom_content
+          keepalive_state_set last_health_probe_reason crash_or_error_page
+          keepalive_log "vnc_browser_dom_unhealthy url=${vnc_url}"
+          keepalive_process_snapshot "health_dom_unhealthy" "url=${vnc_url}" || true
+          return 1
+        fi
+        if [ "$content_rc" -eq 0 ]; then
+          keepalive_state_set last_health_probe_ok 1
+          keepalive_state_set last_health_probe_mode dom_content
+          keepalive_state_set last_health_probe_reason healthy_dom
+          keepalive_log "vnc_browser_health_ok mode=dom_content browser=$(basename "$browser_bin") url=${vnc_url}"
+          return 0
+        fi
         keepalive_state_set last_health_probe_ok 1
         keepalive_state_set last_health_probe_mode tab_state
         keepalive_state_set last_health_probe_reason healthy_tab
@@ -1532,6 +1551,12 @@ const BAD_WORDS = [
   "site can't be reached",
   "this page isn’t working",
   "this page isn't working",
+  "disconnected",
+  "connection lost",
+  "server disconnected",
+  "连接已断开",
+  "已断开连接",
+  "连接丢失",
   "err_",
   "chrome-error://",
   "页面崩溃",
@@ -1755,6 +1780,12 @@ error_words = (
     "site can't be reached",
     "this page isn’t working",
     "this page isn't working",
+    "disconnected",
+    "connection lost",
+    "server disconnected",
+    "连接已断开",
+    "已断开连接",
+    "连接丢失",
     "err_",
     "chrome-error://",
 )
