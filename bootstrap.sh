@@ -3385,7 +3385,7 @@ EOF
 
 ensure_shell_defaults_for_user() {
   local user_name="$1"
-  local home_dir bashrc zshrc p10krc
+  local home_dir bashrc zshrc p10krc bash_profile
   home_dir="$(resolve_user_home_dir "$user_name")"
   [ -n "$home_dir" ] || return 1
 
@@ -3399,11 +3399,13 @@ ensure_shell_defaults_for_user() {
   bashrc="${home_dir}/.bashrc"
   zshrc="${home_dir}/.zshrc"
   p10krc="${home_dir}/.p10k.zsh"
+  bash_profile="${home_dir}/.bash_profile"
   upsert_shell_defaults_block "$bashrc" || true
   upsert_shell_defaults_block "$zshrc" || true
+  printf '%s\n' '[ -f ~/.bashrc ] && source ~/.bashrc' > "$bash_profile" 2>/dev/null || true
   if id -u "$user_name" >/dev/null 2>&1; then
     if can_root; then
-      run_root chown "$user_name":"$user_name" "$bashrc" "$zshrc" "$p10krc" >/dev/null 2>&1 || true
+      run_root chown "$user_name":"$user_name" "$bashrc" "$zshrc" "$p10krc" "$bash_profile" >/dev/null 2>&1 || true
     fi
   fi
   return 0
