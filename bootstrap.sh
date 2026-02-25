@@ -206,6 +206,30 @@ fi
 if [ "$KEEPALIVE_RECOVERY_INTERVAL_SEC" -gt "$KEEPALIVE_INTERVAL_SEC" ] 2>/dev/null; then
   KEEPALIVE_RECOVERY_INTERVAL_SEC="$KEEPALIVE_INTERVAL_SEC"
 fi
+KEEPALIVE_HEALTH_CHECK_INTERVAL_RAW="${HAPPYCAPY_KEEPALIVE_HEALTH_CHECK_INTERVAL_SEC:-45}"
+case "$KEEPALIVE_HEALTH_CHECK_INTERVAL_RAW" in
+  ''|*[!0-9]*)
+    KEEPALIVE_HEALTH_CHECK_INTERVAL_SEC=45
+    ;;
+  *)
+    KEEPALIVE_HEALTH_CHECK_INTERVAL_SEC="$KEEPALIVE_HEALTH_CHECK_INTERVAL_RAW"
+    ;;
+esac
+if [ "$KEEPALIVE_HEALTH_CHECK_INTERVAL_SEC" -lt 10 ] 2>/dev/null; then
+  KEEPALIVE_HEALTH_CHECK_INTERVAL_SEC=10
+fi
+KEEPALIVE_UNHEALTHY_COOLDOWN_RAW="${HAPPYCAPY_KEEPALIVE_UNHEALTHY_COOLDOWN_SEC:-90}"
+case "$KEEPALIVE_UNHEALTHY_COOLDOWN_RAW" in
+  ''|*[!0-9]*)
+    KEEPALIVE_UNHEALTHY_COOLDOWN_SEC=90
+    ;;
+  *)
+    KEEPALIVE_UNHEALTHY_COOLDOWN_SEC="$KEEPALIVE_UNHEALTHY_COOLDOWN_RAW"
+    ;;
+esac
+if [ "$KEEPALIVE_UNHEALTHY_COOLDOWN_SEC" -lt 20 ] 2>/dev/null; then
+  KEEPALIVE_UNHEALTHY_COOLDOWN_SEC=20
+fi
 KEEPALIVE_BROWSER_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_BROWSER:-chromium}" | tr '[:upper:]' '[:lower:]')"
 KEEPALIVE_BROWSER="chromium"
 case "$KEEPALIVE_BROWSER_RAW" in
@@ -217,7 +241,7 @@ KEEPALIVE_BROWSER_VISIBLE=0
 case "$KEEPALIVE_BROWSER_VISIBLE_RAW" in
   1|true|yes|on) KEEPALIVE_BROWSER_VISIBLE=1 ;;
 esac
-KEEPALIVE_FORCE_REFRESH_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_FORCE_REFRESH:-1}" | tr '[:upper:]' '[:lower:]')"
+KEEPALIVE_FORCE_REFRESH_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_FORCE_REFRESH:-0}" | tr '[:upper:]' '[:lower:]')"
 KEEPALIVE_FORCE_REFRESH=0
 case "$KEEPALIVE_FORCE_REFRESH_RAW" in
   1|true|yes|on) KEEPALIVE_FORCE_REFRESH=1 ;;
@@ -232,8 +256,8 @@ case "$KEEPALIVE_FORCE_REFRESH_MODE_RAW" in
     KEEPALIVE_FORCE_REFRESH_MODE="http_touch"
     ;;
 esac
-KEEPALIVE_VNC_PAGE_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_VNC_PAGE:-vnc_lite.html}" | tr '[:upper:]' '[:lower:]')"
-KEEPALIVE_VNC_PAGE="vnc_lite.html"
+KEEPALIVE_VNC_PAGE_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_VNC_PAGE:-vnc.html}" | tr '[:upper:]' '[:lower:]')"
+KEEPALIVE_VNC_PAGE="vnc.html"
 case "$KEEPALIVE_VNC_PAGE_RAW" in
   vnc.html|vnc|full|classic)
     KEEPALIVE_VNC_PAGE="vnc.html"
@@ -304,9 +328,8 @@ if [ ! -s "$KEEPALIVE_VISIBLE_PATH" ]; then
   printf '%s\n' "$KEEPALIVE_BROWSER_VISIBLE" > "$KEEPALIVE_VISIBLE_PATH" 2>/dev/null || true
 fi
 mkdir -p "$(dirname "$KEEPALIVE_PAGE_PATH")" >/dev/null 2>&1 || true
-if [ ! -s "$KEEPALIVE_PAGE_PATH" ]; then
-  printf '%s\n' "$KEEPALIVE_VNC_PAGE" > "$KEEPALIVE_PAGE_PATH" 2>/dev/null || true
-fi
+# Keep page target deterministic across restarts: default to vnc.html unless explicitly overridden.
+printf '%s\n' "$KEEPALIVE_VNC_PAGE" > "$KEEPALIVE_PAGE_PATH" 2>/dev/null || true
 mkdir -p "$(dirname "$KEEPALIVE_REFRESH_MODE_PATH")" >/dev/null 2>&1 || true
 if [ ! -s "$KEEPALIVE_REFRESH_MODE_PATH" ]; then
   printf '%s\n' "$KEEPALIVE_FORCE_REFRESH_MODE" > "$KEEPALIVE_REFRESH_MODE_PATH" 2>/dev/null || true
@@ -597,6 +620,42 @@ keepalive_vnc_page() {
   keepalive_vnc_page_parse "$raw"
 }
 
+keepalive_vnc_url_with_params() {
+  local vnc_base="$1"
+  local vnc_page="$2"
+  local root
+  root="${vnc_base%/}"
+  if [ -z "$root" ]; then
+    return 1
+  fi
+  printf '%s/%s?autoconnect=1&reconnect=1&resize=remote&path=websockify\n' "$root" "$vnc_page"
+}
+
+keepalive_target_url() {
+  local current_url current_base fresh_base vnc_base vnc_page
+  current_url=""
+  if [ -f "$KEEPALIVE_URL_PATH" ]; then
+    current_url="$(cat "$KEEPALIVE_URL_PATH" 2>/dev/null | head -n1 || true)"
+  fi
+  current_base=""
+  if [ -n "$current_url" ]; then
+    current_base="${current_url%%\?*}"
+    current_base="${current_base%/vnc.html}"
+    current_base="${current_base%/vnc_lite.html}"
+  fi
+  fresh_base="$(query_preview_url_for_port 6080 || true)"
+  if [ -n "$fresh_base" ]; then
+    vnc_base="$fresh_base"
+  else
+    vnc_base="$current_base"
+  fi
+  if [ -z "$vnc_base" ]; then
+    return 1
+  fi
+  vnc_page="$(keepalive_vnc_page)"
+  keepalive_vnc_url_with_params "$vnc_base" "$vnc_page"
+}
+
 keepalive_force_refresh_mode() {
   local raw
   raw=""
@@ -696,10 +755,19 @@ ensure_keepalive_window_workspace() {
     return 0
   fi
   moved_any=0
+  if command -v xdotool >/dev/null 2>&1; then
+    DISPLAY="$KEEPALIVE_DISPLAY" xdotool set_num_desktops $((target + 1)) >/dev/null 2>&1 || true
+  fi
   desktop_count="$(DISPLAY="$KEEPALIVE_DISPLAY" wmctrl -d 2>/dev/null | wc -l | tr -d ' ' || true)"
   case "$desktop_count" in
     ''|*[!0-9]*) desktop_count=0 ;;
   esac
+  if [ "$desktop_count" -le 0 ] 2>/dev/null; then
+    desktop_count="$(DISPLAY="$KEEPALIVE_DISPLAY" xdotool get_num_desktops 2>/dev/null | head -n1 || true)"
+    case "$desktop_count" in
+      ''|*[!0-9]*) desktop_count=0 ;;
+    esac
+  fi
   if [ "$desktop_count" -le "$target" ] 2>/dev/null; then
     DISPLAY="$KEEPALIVE_DISPLAY" wmctrl -n $((target + 1)) >/dev/null 2>&1 || true
   fi
@@ -1106,7 +1174,9 @@ for item in data:
         item_url.startswith("chrome-error://")
         or item_url in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")
     )
-    if item_id and (item_url.startswith(base) or is_noise):
+    # Keepalive browser is dedicated: close any stale noVNC tabs (across rotated preview URLs).
+    is_novnc = ("/vnc.html" in item_url) or ("/vnc_lite.html" in item_url)
+    if item_id and (item_url.startswith(base) or is_noise or is_novnc):
         print(item_id)
 PY
     )"
@@ -1161,7 +1231,9 @@ for item in data:
         url.startswith("chrome-error://")
         or url in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")
     )
-    if tid and (url.startswith(base) or is_noise):
+    # Keepalive browser is dedicated: include all noVNC tabs for global dedupe.
+    is_novnc = ("/vnc.html" in url) or ("/vnc_lite.html" in url)
+    if tid and (url.startswith(base) or is_noise or is_novnc):
         tabs.append((tid, url))
 out["before"] = len(tabs)
 if len(tabs) <= 1:
@@ -1681,7 +1753,11 @@ keepalive_pid_display() {
 }
 
 vnc_browser_keepalive_tick() {
-  local vnc_base vnc_url vnc_page browser_bin current_pid current_url desired_visible pid_display current_base fresh_base current_headless
+  local force_refresh_now vnc_base vnc_url vnc_page browser_bin current_pid current_url desired_visible pid_display current_base fresh_base current_headless
+  force_refresh_now=0
+  case "${1:-0}" in
+    1|true|yes|on) force_refresh_now=1 ;;
+  esac
   current_pid=0
   if [ -f "$KEEPALIVE_PID_FILE" ]; then
     current_pid="$(cat "$KEEPALIVE_PID_FILE" 2>/dev/null | tr -dc '0-9')"
@@ -1713,7 +1789,10 @@ vnc_browser_keepalive_tick() {
     return 1
   fi
   vnc_page="$(keepalive_vnc_page)"
-  vnc_url="${vnc_base%/}/${vnc_page}"
+  vnc_url="$(keepalive_vnc_url_with_params "$vnc_base" "$vnc_page" || true)"
+  if [ -z "$vnc_url" ]; then
+    vnc_url="${vnc_base%/}/${vnc_page}?autoconnect=1&reconnect=1&resize=remote&path=websockify"
+  fi
   browser_bin="$(find_browser_bin || true)"
   if [ -z "$browser_bin" ]; then
     keepalive_log "vnc_browser_skip reason=no_browser_bin"
@@ -1745,7 +1824,7 @@ vnc_browser_keepalive_tick() {
       if [ "$desired_visible" -eq 1 ]; then
         ensure_keepalive_window_workspace "$current_pid" || true
       fi
-        if [ "$KEEPALIVE_FORCE_REFRESH" -eq 1 ]; then
+        if [ "$KEEPALIVE_FORCE_REFRESH" -eq 1 ] || [ "$force_refresh_now" -eq 1 ]; then
         if [ "$current_headless" -eq 1 ]; then
           if reload_vnc_browser_keepalive_url "$browser_bin" "$vnc_url" && verify_vnc_browser_refresh_health "$vnc_url"; then
             keepalive_state_mark_refresh "headless_cdp_reload" "$vnc_url" 1
@@ -1755,6 +1834,13 @@ vnc_browser_keepalive_tick() {
           fi
           keepalive_state_mark_refresh "headless_refresh_failed" "$vnc_url" 0
           keepalive_log "vnc_browser_force_refresh_failed pid=${current_pid} browser=$(basename "$browser_bin") mode=headless_cdp_reload url=${vnc_url}"
+          stop_keepalive_browser || true
+          if start_vnc_browser_keepalive "$browser_bin" "$vnc_url"; then
+            keepalive_state_mark_refresh "headless_restart_browser" "$vnc_url" 1
+            keepalive_log "vnc_browser_force_refresh_recovered pid=${current_pid} browser=$(basename "$browser_bin") mode=headless_restart url=${vnc_url}"
+            keepalive_process_snapshot "tick_force_refresh_recovered_headless" "pid=${current_pid} url=${vnc_url}" || true
+            return 0
+          fi
           keepalive_process_snapshot "tick_force_refresh_fail_headless" "pid=${current_pid} url=${vnc_url}" || true
           return 1
         fi
@@ -1772,6 +1858,13 @@ vnc_browser_keepalive_tick() {
         fi
         keepalive_state_mark_refresh "visible_refresh_failed" "$vnc_url" 0
         keepalive_log "vnc_browser_force_refresh_failed pid=${current_pid} browser=$(basename "$browser_bin") mode=visible_only url=${vnc_url}"
+        stop_keepalive_browser || true
+        if start_vnc_browser_keepalive "$browser_bin" "$vnc_url"; then
+          keepalive_state_mark_refresh "visible_restart_browser" "$vnc_url" 1
+          keepalive_log "vnc_browser_force_refresh_recovered pid=${current_pid} browser=$(basename "$browser_bin") mode=visible_restart url=${vnc_url}"
+          keepalive_process_snapshot "tick_force_refresh_recovered_visible_restart" "pid=${current_pid} url=${vnc_url}" || true
+          return 0
+        fi
         keepalive_process_snapshot "tick_force_refresh_fail_visible" "pid=${current_pid} url=${vnc_url}" || true
         return 1
       fi
@@ -3077,10 +3170,10 @@ const cfg = {
   installAuditLogPath: process.env.HAPPYCAPY_INSTALL_AUDIT_LOG_PATH || "/tmp/happycapy-install-audit.log",
   processAuditLogPath: process.env.HAPPYCAPY_PROCESS_AUDIT_LOG_PATH || "/tmp/happycapy-process-audit.log",
   keepaliveForceRefresh: ["1", "true", "yes", "on"].includes(
-    String(process.env.HAPPYCAPY_KEEPALIVE_FORCE_REFRESH || "1").toLowerCase()
+    String(process.env.HAPPYCAPY_KEEPALIVE_FORCE_REFRESH || "0").toLowerCase()
   ),
   keepaliveForceRefreshMode: String(process.env.HAPPYCAPY_KEEPALIVE_FORCE_REFRESH_MODE || "http_touch"),
-  keepaliveVncPage: String(process.env.HAPPYCAPY_KEEPALIVE_VNC_PAGE || "vnc_lite.html"),
+  keepaliveVncPage: String(process.env.HAPPYCAPY_KEEPALIVE_VNC_PAGE || "vnc.html"),
   keepalivePagePath: process.env.HAPPYCAPY_KEEPALIVE_PAGE_PATH || "",
   keepaliveRefreshModePath: process.env.HAPPYCAPY_KEEPALIVE_REFRESH_MODE_PATH || "",
   exportTimeout: Number(process.env.HAPPYCAPY_EXPORT_PORT_TIMEOUT_SEC || "8"),
@@ -3221,11 +3314,11 @@ function parseKeepaliveRefreshMode(raw, fallback = "http_touch") {
   return String(fallback || "http_touch") === "cdp_reload" ? "cdp_reload" : "http_touch";
 }
 
-function parseKeepalivePage(raw, fallback = "vnc_lite.html") {
+function parseKeepalivePage(raw, fallback = "vnc.html") {
   const text = String(raw || "").trim().toLowerCase();
   if (["vnc.html", "vnc", "full", "classic"].includes(text)) return "vnc.html";
   if (["vnc_lite.html", "vnc-lite", "vnc_lite", "lite"].includes(text)) return "vnc_lite.html";
-  return String(fallback || "vnc_lite.html").trim().toLowerCase() === "vnc.html" ? "vnc.html" : "vnc_lite.html";
+  return String(fallback || "vnc.html").trim().toLowerCase() === "vnc_lite.html" ? "vnc_lite.html" : "vnc.html";
 }
 
 function readKeepaliveVisibleDesired() {
@@ -3297,7 +3390,7 @@ function writeKeepaliveRefreshModeDesired(mode) {
 }
 
 function readKeepalivePageDesired() {
-  const fallback = parseKeepalivePage(cfg.keepaliveVncPage || "vnc_lite.html", "vnc_lite.html");
+  const fallback = parseKeepalivePage(cfg.keepaliveVncPage || "vnc.html", "vnc.html");
   const raw = readText(cfg.keepalivePagePath || "");
   if (!raw) return fallback;
   return parseKeepalivePage(raw, fallback);
@@ -3469,7 +3562,7 @@ function keepaliveStatus() {
   );
   const keepalivePage = parseKeepalivePage(
     readKeepalivePageDesired() || state.vnc_page,
-    parseKeepalivePage(cfg.keepaliveVncPage || "vnc_lite.html", "vnc_lite.html")
+    parseKeepalivePage(cfg.keepaliveVncPage || "vnc.html", "vnc.html")
   );
   const lastTickAt = String(state.last_tick_at || "").trim();
   const lastTickMs = Date.parse(lastTickAt || "");
@@ -4471,13 +4564,18 @@ watchdog_loop() {
   local heartbeat_last_ts=0
   local keepalive_last_ts=0
   local keepalive_recover_last_ts=0
+  local keepalive_health_last_ts=0
+  local keepalive_unhealthy_last_ts=0
   local autorestore_skip_logged=0
   local now_ts=0
   local hb_ext_rc=0
   local keepalive_triggered=0
   local keepalive_due=0
   local keepalive_recover_due=0
+  local keepalive_health_due=0
+  local keepalive_unhealthy_due=0
   local keepalive_pid_alive=0
+  local keepalive_health_url=""
   if [ "$KEEPALIVE_MODE" != "vnc-browser" ]; then
     stop_keepalive_browser || true
   fi
@@ -4542,8 +4640,35 @@ watchdog_loop() {
             keepalive_recover_due=1
           fi
         fi
-        if [ "$keepalive_due" -eq 1 ] || [ "$keepalive_recover_due" -eq 1 ]; then
-          vnc_browser_keepalive_tick || true
+        keepalive_health_due=0
+        keepalive_unhealthy_due=0
+        keepalive_health_url=""
+        if [ "$keepalive_pid_alive" -eq 1 ] && [ "$KEEPALIVE_HEALTH_CHECK_INTERVAL_SEC" -gt 0 ] && [ "$now_ts" -gt 0 ]; then
+          if [ "$keepalive_health_last_ts" -eq 0 ] || [ $((now_ts - keepalive_health_last_ts)) -ge "$KEEPALIVE_HEALTH_CHECK_INTERVAL_SEC" ]; then
+            keepalive_health_due=1
+          fi
+        fi
+        if [ "$keepalive_health_due" -eq 1 ]; then
+          keepalive_health_url="$(keepalive_target_url || true)"
+          if [ -n "$keepalive_health_url" ] && verify_vnc_browser_refresh_health "$keepalive_health_url"; then
+            keepalive_health_last_ts="$now_ts"
+          else
+            keepalive_health_last_ts="$now_ts"
+            if [ "$keepalive_unhealthy_last_ts" -eq 0 ] || [ $((now_ts - keepalive_unhealthy_last_ts)) -ge "$KEEPALIVE_UNHEALTHY_COOLDOWN_SEC" ]; then
+              keepalive_unhealthy_due=1
+            fi
+          fi
+        fi
+        if [ "$keepalive_due" -eq 1 ] || [ "$keepalive_recover_due" -eq 1 ] || [ "$keepalive_unhealthy_due" -eq 1 ]; then
+          local keepalive_force_refresh_now
+          keepalive_force_refresh_now=0
+          if [ "$keepalive_unhealthy_due" -eq 1 ]; then
+            keepalive_force_refresh_now=1
+          fi
+          vnc_browser_keepalive_tick "$keepalive_force_refresh_now" || true
+          if [ "$keepalive_unhealthy_due" -eq 1 ]; then
+            keepalive_unhealthy_last_ts="$now_ts"
+          fi
           if [ "$keepalive_due" -eq 1 ]; then
             keepalive_last_ts="$now_ts"
           fi
