@@ -32,6 +32,11 @@ CHISEL_AUTH="${HAPPYCAPY_CHISEL_AUTH:-user:ChiselPass2026}"
 REGISTRY_FILE="${HAPPYCAPY_REGISTRY_FILE:-happycapy_${ALIAS}.txt}"
 UPLOAD_API="${HAPPYCAPY_REGISTRY_UPLOAD_API:-https://file.zmkk.fun/api/upload}"
 REGISTRY_BASE="${HAPPYCAPY_REGISTRY_BASE:-https://file.zmkk.fun}"
+OHMYZSH_INSTALL_URL="${HAPPYCAPY_OHMYZSH_INSTALL_URL:-https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh}"
+P10K_REPO_URL="${HAPPYCAPY_P10K_REPO_URL:-https://github.com/romkatv/powerlevel10k.git}"
+DOTFILE_BASHRC_URL="${HAPPYCAPY_DOTFILE_BASHRC_URL:-https://raw.githubusercontent.com/hhsw2015/bin/refs/heads/main/.bashrc}"
+DOTFILE_ZSHRC_URL="${HAPPYCAPY_DOTFILE_ZSHRC_URL:-https://raw.githubusercontent.com/hhsw2015/bin/refs/heads/main/.zshrc}"
+DOTFILE_P10K_URL="${HAPPYCAPY_DOTFILE_P10K_URL:-https://raw.githubusercontent.com/hhsw2015/bin/refs/heads/main/.p10k.zsh}"
 PERSIST_ROOT="${HAPPYCAPY_PERSIST_ROOT:-}"
 # Normalize transient workspace-style roots to a stable persisted root.
 # Example: /home/node/a0/workspace/<session>/workspace -> /home/node/a0/workspace
@@ -54,6 +59,8 @@ if [ -z "$PERSIST_ROOT" ] || [ ! -d "$PERSIST_ROOT" ]; then
   fi
 fi
 PERSIST_DIR="${PERSIST_ROOT}/.happycapy"
+SHELL_PROFILE_MARKER="${PERSIST_DIR}/shell-profile-ohmyzsh-v1.ready"
+SHELL_PROFILE_VERSION="2026-02-25-ohmyzsh-p10k-v1"
 PERSIST_BOOTSTRAP="${PERSIST_DIR}/bootstrap.sh"
 RECOVER_SCRIPT_PATH="${HAPPYCAPY_RECOVER_SCRIPT:-${PERSIST_DIR}/happycapy-recover.sh}"
 WORKSPACE_RECOVER_GLOB="/home/node/*/workspace/.happycapy/happycapy-recover.sh"
@@ -141,6 +148,24 @@ case "$HEARTBEAT_TIMEOUT_RAW" in
 esac
 if [ "$HEARTBEAT_TIMEOUT_SEC" -lt 2 ] 2>/dev/null; then
   HEARTBEAT_TIMEOUT_SEC=2
+fi
+WEBSOCKIFY_HEARTBEAT_RAW="${HAPPYCAPY_WEBSOCKIFY_HEARTBEAT_SEC:-25}"
+case "$WEBSOCKIFY_HEARTBEAT_RAW" in
+  ''|*[!0-9]*)
+    WEBSOCKIFY_HEARTBEAT_SEC=25
+    ;;
+  *)
+    WEBSOCKIFY_HEARTBEAT_SEC="$WEBSOCKIFY_HEARTBEAT_RAW"
+    ;;
+esac
+if [ "$WEBSOCKIFY_HEARTBEAT_SEC" -lt 0 ] 2>/dev/null; then
+  WEBSOCKIFY_HEARTBEAT_SEC=25
+fi
+if [ "$WEBSOCKIFY_HEARTBEAT_SEC" -gt 0 ] 2>/dev/null && [ "$WEBSOCKIFY_HEARTBEAT_SEC" -lt 5 ] 2>/dev/null; then
+  WEBSOCKIFY_HEARTBEAT_SEC=5
+fi
+if [ "$WEBSOCKIFY_HEARTBEAT_SEC" -gt 300 ] 2>/dev/null; then
+  WEBSOCKIFY_HEARTBEAT_SEC=300
 fi
 BOOTSTRAP_LOCK_WAIT_RAW="${HAPPYCAPY_BOOTSTRAP_LOCK_WAIT_SEC:-45}"
 case "$BOOTSTRAP_LOCK_WAIT_RAW" in
@@ -799,6 +824,78 @@ ensure_keepalive_window_workspace() {
   return 0
 }
 
+keepalive_windows_on_target_workspace() {
+  local pid="$1"
+  local target="$2"
+  local win_id current_ws found_any mapped_any
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$target" in
+    ''|*[!0-9-]*) return 1 ;;
+  esac
+  [ "$pid" -gt 0 ] 2>/dev/null || return 1
+  found_any=0
+  mapped_any=0
+  while IFS= read -r win_id; do
+    [ -n "$win_id" ] || continue
+    found_any=1
+    current_ws="$(DISPLAY="$KEEPALIVE_DISPLAY" xdotool get_desktop_for_window "$win_id" 2>/dev/null || true)"
+    case "$current_ws" in
+      ''|*[!0-9-]*) continue ;;
+    esac
+    if [ "$current_ws" -lt 0 ] 2>/dev/null; then
+      continue
+    fi
+    mapped_any=1
+    if [ "$current_ws" -ne "$target" ] 2>/dev/null; then
+      return 1
+    fi
+  done < <(DISPLAY="$KEEPALIVE_DISPLAY" xdotool search --pid "$pid" 2>/dev/null || true)
+  [ "$found_any" -eq 1 ] || return 1
+  [ "$mapped_any" -eq 1 ] || return 1
+  return 0
+}
+
+ensure_keepalive_window_workspace_retry() {
+  local pid="$1"
+  local max_try="${2:-40}"
+  local sleep_sec="${3:-0.15}"
+  local target="$KEEPALIVE_WORKSPACE"
+  local n
+  case "$pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  case "$max_try" in
+    ''|*[!0-9]*) max_try=40 ;;
+  esac
+  if [ "$max_try" -lt 1 ] 2>/dev/null; then
+    max_try=1
+  fi
+  if [ "$target" -lt 0 ] 2>/dev/null; then
+    return 0
+  fi
+  if ! command -v xdotool >/dev/null 2>&1 || ! command -v wmctrl >/dev/null 2>&1; then
+    return 0
+  fi
+  n=1
+  while [ "$n" -le "$max_try" ]; do
+    ensure_keepalive_window_workspace "$pid" >/dev/null 2>&1 || true
+    if keepalive_windows_on_target_workspace "$pid" "$target"; then
+      if [ "$n" -gt 1 ] 2>/dev/null; then
+        keepalive_log "vnc_browser_workspace_retry_ok pid=${pid} target=${target} try=${n}"
+      fi
+      return 0
+    fi
+    if [ "$n" -lt "$max_try" ] 2>/dev/null; then
+      sleep "$sleep_sec"
+    fi
+    n=$((n + 1))
+  done
+  keepalive_log "vnc_browser_workspace_retry_timeout pid=${pid} target=${target} tries=${max_try}"
+  return 1
+}
+
 find_sshd_bin() {
   if command -v sshd >/dev/null 2>&1; then
     command -v sshd
@@ -1057,7 +1154,7 @@ start_vnc_browser_keepalive() {
       visible_try_ok=1
       printf '%s\n' "$pid" > "$KEEPALIVE_PID_FILE"
       printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
-      ensure_keepalive_window_workspace "$pid" || true
+      ensure_keepalive_window_workspace_retry "$pid" 60 0.15 || true
       keepalive_state_mark_refresh "launch_visible" "$vnc_url" 1
       keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} mode=visible display=${KEEPALIVE_DISPLAY} url=${vnc_url}"
       return 0
@@ -1085,7 +1182,7 @@ start_vnc_browser_keepalive() {
       visible_try_ok=1
       printf '%s\n' "$pid" > "$KEEPALIVE_PID_FILE"
       printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
-      ensure_keepalive_window_workspace "$pid" || true
+      ensure_keepalive_window_workspace_retry "$pid" 60 0.15 || true
       keepalive_state_mark_refresh "launch_visible_retry" "$vnc_url" 1
       keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} mode=visible-retry display=${KEEPALIVE_DISPLAY} url=${vnc_url}"
       return 0
@@ -1170,13 +1267,9 @@ for item in data:
     item_url = str(item.get("url", "") or "").strip()
     if item_type and item_type != "page":
         continue
-    is_noise = (
-        item_url.startswith("chrome-error://")
-        or item_url in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")
-    )
-    # Keepalive browser is dedicated: close any stale noVNC tabs (across rotated preview URLs).
-    is_novnc = ("/vnc.html" in item_url) or ("/vnc_lite.html" in item_url)
-    if item_id and (item_url.startswith(base) or is_noise or is_novnc):
+    # Keepalive browser uses dedicated profile. Enforce single-tab model:
+    # collect every page/typeless tab id and close all of them before opening target URL.
+    if item_id:
         print(item_id)
 PY
     )"
@@ -1227,13 +1320,9 @@ for item in data:
     url = str(item.get("url", "") or "").strip()
     if ttype and ttype != "page":
         continue
-    is_noise = (
-        url.startswith("chrome-error://")
-        or url in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")
-    )
-    # Keepalive browser is dedicated: include all noVNC tabs for global dedupe.
-    is_novnc = ("/vnc.html" in url) or ("/vnc_lite.html" in url)
-    if tid and (url.startswith(base) or is_noise or is_novnc):
+    # Keepalive browser uses dedicated profile. Consider every page/typeless tab
+    # as dedupe candidate so stale Google/new-tab/error tabs cannot accumulate.
+    if tid:
         tabs.append((tid, url))
 out["before"] = len(tabs)
 if len(tabs) <= 1:
@@ -1288,7 +1377,7 @@ PY
 
 visible_vnc_window_reload() {
   local vnc_url="$1"
-  local win_id pid_now reload_url
+  local win_id pid_now reload_url browser_bin
   pid_now="$(cat "$KEEPALIVE_PID_FILE" 2>/dev/null | tr -dc '0-9' || true)"
   [ -n "$pid_now" ] || pid_now=0
   if ! command -v xdotool >/dev/null 2>&1; then
@@ -1296,7 +1385,7 @@ visible_vnc_window_reload() {
     return 1
   fi
   activate_vnc_browser_tab "$vnc_url" || true
-  ensure_keepalive_window_workspace "$pid_now" || true
+  ensure_keepalive_window_workspace_retry "$pid_now" 24 0.12 || true
   win_id="$(keepalive_pick_window_for_pid "$pid_now" || true)"
   if [ -z "$win_id" ]; then
     # Do not fallback to generic noVNC/chromium windows; that can touch user's work browser.
@@ -1304,9 +1393,25 @@ visible_vnc_window_reload() {
     return 1
   fi
   reload_url="$vnc_url"
-  # Prefer explicit URL reload over Ctrl+R so a crashed/error tab can be recovered.
+  # Prefer CDP URL navigation first (deterministic exact URL, avoids omnibox search redirects).
+  browser_bin="$(find_browser_bin || true)"
+  if [ -n "$browser_bin" ] \
+    && reload_vnc_browser_keepalive_url "$browser_bin" "$vnc_url" \
+    && activate_vnc_browser_tab "$vnc_url"; then
+    if verify_vnc_browser_refresh_health "$vnc_url"; then
+      keepalive_state_mark_refresh "visible_cdp_new_tab" "$vnc_url" 1
+      dedupe_vnc_browser_tabs "$vnc_url" || true
+      keepalive_log "vnc_browser_force_refresh_ok pid=${pid_now} browser=$(basename "$browser_bin") mode=visible_cdp_new_tab win=${win_id} url=${vnc_url}"
+      return 0
+    fi
+    keepalive_log "vnc_browser_force_refresh_unhealthy pid=${pid_now} browser=$(basename "$browser_bin") mode=visible_cdp_new_tab win=${win_id} url=${vnc_url}"
+  fi
+  # Fallback to explicit omnibox URL entry when CDP path is unavailable.
+  # Use Ctrl+A + Backspace to avoid partial text causing Google search.
   if DISPLAY="$KEEPALIVE_DISPLAY" xdotool key --window "$win_id" --clearmodifiers ctrl+1 >/dev/null 2>&1 \
     && DISPLAY="$KEEPALIVE_DISPLAY" xdotool key --window "$win_id" --clearmodifiers ctrl+l >/dev/null 2>&1 \
+    && DISPLAY="$KEEPALIVE_DISPLAY" xdotool key --window "$win_id" --clearmodifiers ctrl+a >/dev/null 2>&1 \
+    && DISPLAY="$KEEPALIVE_DISPLAY" xdotool key --window "$win_id" BackSpace >/dev/null 2>&1 \
     && DISPLAY="$KEEPALIVE_DISPLAY" xdotool type --window "$win_id" --delay 1 -- "$reload_url" >/dev/null 2>&1 \
     && DISPLAY="$KEEPALIVE_DISPLAY" xdotool key --window "$win_id" Return >/dev/null 2>&1; then
     if verify_vnc_browser_refresh_health "$vnc_url"; then
@@ -1694,7 +1799,7 @@ PY
 ensure_vnc_browser_tab() {
   local browser_bin="$1"
   local vnc_url="$2"
-  local browser_name tab_rc
+  local browser_name tab_rc content_rc
   browser_name="$(basename "$browser_bin")"
   vnc_browser_tab_state "$browser_bin" "$vnc_url"
   tab_rc=$?
@@ -1702,8 +1807,18 @@ ensure_vnc_browser_tab() {
     return 0
   fi
   if [ "$tab_rc" -eq 2 ]; then
-    keepalive_log "vnc_browser_tab_unknown browser=${browser_name} reason=cdp_unavailable_or_unsupported"
-    return 0
+    vnc_browser_content_state "$vnc_url"
+    content_rc=$?
+    if [ "$content_rc" -eq 0 ]; then
+      keepalive_log "vnc_browser_tab_unknown_dom_ok browser=${browser_name} reason=cdp_list_unknown"
+      return 0
+    fi
+    if reload_vnc_browser_keepalive_url "$browser_bin" "$vnc_url"; then
+      keepalive_log "vnc_browser_tab_unknown_rehydrated browser=${browser_name} reason=dom_unhealthy_or_unknown url=${vnc_url}"
+      return 0
+    fi
+    keepalive_log "vnc_browser_tab_unknown_restore_failed browser=${browser_name} reason=dom_unhealthy_or_unknown url=${vnc_url}"
+    return 1
   fi
   if reload_vnc_browser_keepalive_url "$browser_bin" "$vnc_url"; then
     keepalive_log "vnc_browser_tab_restored browser=${browser_name} url=${vnc_url}"
@@ -1817,12 +1932,29 @@ vnc_browser_keepalive_tick() {
         keepalive_log "vnc_browser_visibility_mismatch pid=${current_pid} target=visible action=no_restart_keep_running"
       fi
       if ! ensure_vnc_browser_tab "$browser_bin" "$vnc_url"; then
+        if [ "$KEEPALIVE_FORCE_REFRESH" -eq 1 ] || [ "$force_refresh_now" -eq 1 ]; then
+          if [ "$current_headless" -eq 1 ]; then
+            if reload_vnc_browser_keepalive_url "$browser_bin" "$vnc_url" && verify_vnc_browser_refresh_health "$vnc_url"; then
+              keepalive_state_mark_refresh "tab_ensure_failed_headless_cdp_reload" "$vnc_url" 1
+              keepalive_log "vnc_browser_tab_ensure_recovered pid=${current_pid} browser=$(basename "$browser_bin") mode=headless_cdp_reload url=${vnc_url}"
+              keepalive_process_snapshot "tick_tab_ensure_recovered_headless" "pid=${current_pid} url=${vnc_url}" || true
+              return 0
+            fi
+          else
+            if visible_vnc_window_reload "$vnc_url"; then
+              keepalive_state_mark_refresh "tab_ensure_failed_visible_reload" "$vnc_url" 1
+              keepalive_log "vnc_browser_tab_ensure_recovered pid=${current_pid} browser=$(basename "$browser_bin") mode=visible_reload url=${vnc_url}"
+              keepalive_process_snapshot "tick_tab_ensure_recovered_visible" "pid=${current_pid} url=${vnc_url}" || true
+              return 0
+            fi
+          fi
+        fi
         keepalive_log "vnc_browser_tab_ensure_failed pid=${current_pid} browser=$(basename "$browser_bin") action=no_restart_wait_next_tick url=${vnc_url}"
         return 1
       fi
       dedupe_vnc_browser_tabs "$vnc_url" || true
       if [ "$desired_visible" -eq 1 ]; then
-        ensure_keepalive_window_workspace "$current_pid" || true
+        ensure_keepalive_window_workspace_retry "$current_pid" 24 0.12 || true
       fi
         if [ "$KEEPALIVE_FORCE_REFRESH" -eq 1 ] || [ "$force_refresh_now" -eq 1 ]; then
         if [ "$current_headless" -eq 1 ]; then
@@ -1969,21 +2101,21 @@ install_packages() {
     with_retry 3 run_root apt-get -o DPkg::Lock::Timeout=180 update -y >/tmp/hc-apt-update.log 2>&1
     rc_update=$?
     with_retry 3 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y \
-      curl ca-certificates gzip openssh-server supervisor nodejs >/tmp/hc-apt-install.log 2>&1
+      curl ca-certificates gzip openssh-server supervisor nodejs git zsh >/tmp/hc-apt-install.log 2>&1
     rc_install=$?
     set -e
     install_log "core_install_end manager=apt rc_update=${rc_update} rc_install=${rc_install} update_log=/tmp/hc-apt-update.log install_log=/tmp/hc-apt-install.log"
   elif command -v apk >/dev/null 2>&1; then
     install_log "core_install_start manager=apk"
     set +e
-    with_retry 2 run_root apk add --no-cache curl gzip openssh supervisor nodejs >/tmp/hc-apk-install.log 2>&1
+    with_retry 2 run_root apk add --no-cache curl gzip openssh supervisor nodejs git zsh >/tmp/hc-apk-install.log 2>&1
     rc_install=$?
     set -e
     install_log "core_install_end manager=apk rc_install=${rc_install} install_log=/tmp/hc-apk-install.log"
   elif command -v yum >/dev/null 2>&1; then
     install_log "core_install_start manager=yum"
     set +e
-    with_retry 2 run_root yum install -y curl gzip openssh-server supervisor nodejs >/tmp/hc-yum-install.log 2>&1
+    with_retry 2 run_root yum install -y curl gzip openssh-server supervisor nodejs git zsh >/tmp/hc-yum-install.log 2>&1
     rc_install=$?
     set -e
     install_log "core_install_end manager=yum rc_install=${rc_install} install_log=/tmp/hc-yum-install.log"
@@ -2490,6 +2622,7 @@ ensure_keepalive_desktop_service_registration() {
   local desktop_dir launcher service_dir service_cmdf
   local launcher_tmp service_cmdf_tmp
   local keepalive_display_cfg keepalive_workspace_cfg work_workspace_cfg desktop_resolution_cfg
+  local websockify_heartbeat_cfg
   [ "$KEEPALIVE_MODE" = "vnc-browser" ] || return 0
 
   desktop_dir="$PERSIST_DIR/desktop"
@@ -2502,6 +2635,7 @@ ensure_keepalive_desktop_service_registration() {
   keepalive_workspace_cfg="${KEEPALIVE_WORKSPACE:-1}"
   work_workspace_cfg="${WORK_WORKSPACE:-0}"
   desktop_resolution_cfg="${DESKTOP_RESOLUTION:-1366x768x24}"
+  websockify_heartbeat_cfg="${WEBSOCKIFY_HEARTBEAT_SEC:-25}"
 
   mkdir -p "$desktop_dir" "$service_dir"
 
@@ -2553,6 +2687,24 @@ if [ "$KEEPALIVE_WORKSPACE" -ge 0 ] 2>/dev/null && [ "$KEEPALIVE_WORKSPACE" -eq 
   KEEPALIVE_WORKSPACE=$((WORK_WORKSPACE + 1))
 fi
 RESOLUTION="${HAPPYCAPY_DESKTOP_RESOLUTION:-1366x768x24}"
+WEBSOCKIFY_HEARTBEAT_RAW="${HAPPYCAPY_WEBSOCKIFY_HEARTBEAT_SEC:-25}"
+case "$WEBSOCKIFY_HEARTBEAT_RAW" in
+  ''|*[!0-9]*)
+    WEBSOCKIFY_HEARTBEAT_SEC=25
+    ;;
+  *)
+    WEBSOCKIFY_HEARTBEAT_SEC="$WEBSOCKIFY_HEARTBEAT_RAW"
+    ;;
+esac
+if [ "$WEBSOCKIFY_HEARTBEAT_SEC" -lt 0 ] 2>/dev/null; then
+  WEBSOCKIFY_HEARTBEAT_SEC=25
+fi
+if [ "$WEBSOCKIFY_HEARTBEAT_SEC" -gt 0 ] 2>/dev/null && [ "$WEBSOCKIFY_HEARTBEAT_SEC" -lt 5 ] 2>/dev/null; then
+  WEBSOCKIFY_HEARTBEAT_SEC=5
+fi
+if [ "$WEBSOCKIFY_HEARTBEAT_SEC" -gt 300 ] 2>/dev/null; then
+  WEBSOCKIFY_HEARTBEAT_SEC=300
+fi
 
 ensure_desktop_count() {
   local target="$1"
@@ -2680,15 +2832,23 @@ if [ -z "$WSK_CMDLINE" ]; then
   websockify_restart_needed=1
 elif [ -n "$WEB_ROOT" ] && ! printf '%s' "$WSK_CMDLINE" | grep -F -- "$WEB_ROOT" >/dev/null 2>&1; then
   websockify_restart_needed=1
+elif [ "$WEBSOCKIFY_HEARTBEAT_SEC" -gt 0 ] 2>/dev/null && ! printf '%s' "$WSK_CMDLINE" | grep -E -- "--heartbeat[[:space:]]+${WEBSOCKIFY_HEARTBEAT_SEC}([[:space:]]|$)" >/dev/null 2>&1; then
+  websockify_restart_needed=1
+elif [ "$WEBSOCKIFY_HEARTBEAT_SEC" -eq 0 ] 2>/dev/null && printf '%s' "$WSK_CMDLINE" | grep -E -- "--heartbeat[[:space:]]+[0-9]+" >/dev/null 2>&1; then
+  websockify_restart_needed=1
 fi
 
 if [ "$websockify_restart_needed" -eq 1 ]; then
   kill_websockify_6080
   if command -v websockify >/dev/null 2>&1; then
+    WS_HB_ARGS=()
+    if [ "$WEBSOCKIFY_HEARTBEAT_SEC" -gt 0 ] 2>/dev/null; then
+      WS_HB_ARGS=(--heartbeat "$WEBSOCKIFY_HEARTBEAT_SEC")
+    fi
     if [ -n "$WEB_ROOT" ]; then
-      nohup websockify --web "$WEB_ROOT" 0.0.0.0:6080 localhost:5901 >"$DROOT/websockify.log" 2>&1 &
+      nohup websockify "${WS_HB_ARGS[@]}" --web "$WEB_ROOT" 0.0.0.0:6080 localhost:5901 >"$DROOT/websockify.log" 2>&1 &
     else
-      nohup websockify 0.0.0.0:6080 localhost:5901 >"$DROOT/websockify.log" 2>&1 &
+      nohup websockify "${WS_HB_ARGS[@]}" 0.0.0.0:6080 localhost:5901 >"$DROOT/websockify.log" 2>&1 &
     fi
   else
     nohup novnc_proxy --listen 6080 --vnc localhost:5901 >"$DROOT/websockify.log" 2>&1 &
@@ -2749,7 +2909,7 @@ EOF2
   chmod 700 "$launcher" || true
 
   cat > "$service_cmdf_tmp" <<EOF2
-PERSIST_ROOT="\$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; PERSIST_ROOT="\$(printf '%s' "\$PERSIST_ROOT" | sed -E 's#^(/home/node/[^/]+/workspace)/.+/workspace/?$#\\1#')"; if [ -d /home/node/a0/workspace ]; then PERSIST_ROOT="/home/node/a0/workspace"; fi; [ -z "\$PERSIST_ROOT" ] && PERSIST_ROOT="\$HOME"; HAPPYCAPY_PERSIST_ROOT="\$PERSIST_ROOT" HAPPYCAPY_KEEPALIVE_DISPLAY="${keepalive_display_cfg}" HAPPYCAPY_KEEPALIVE_WORKSPACE="${keepalive_workspace_cfg}" HAPPYCAPY_WORK_WORKSPACE="${work_workspace_cfg}" HAPPYCAPY_DESKTOP_RESOLUTION="${desktop_resolution_cfg}" bash "\$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
+PERSIST_ROOT="\$(ls -d /home/node/*/workspace 2>/dev/null | head -n1 || true)"; PERSIST_ROOT="\$(printf '%s' "\$PERSIST_ROOT" | sed -E 's#^(/home/node/[^/]+/workspace)/.+/workspace/?$#\\1#')"; if [ -d /home/node/a0/workspace ]; then PERSIST_ROOT="/home/node/a0/workspace"; fi; [ -z "\$PERSIST_ROOT" ] && PERSIST_ROOT="\$HOME"; HAPPYCAPY_PERSIST_ROOT="\$PERSIST_ROOT" HAPPYCAPY_KEEPALIVE_DISPLAY="${keepalive_display_cfg}" HAPPYCAPY_KEEPALIVE_WORKSPACE="${keepalive_workspace_cfg}" HAPPYCAPY_WORK_WORKSPACE="${work_workspace_cfg}" HAPPYCAPY_DESKTOP_RESOLUTION="${desktop_resolution_cfg}" HAPPYCAPY_WEBSOCKIFY_HEARTBEAT_SEC="${websockify_heartbeat_cfg}" bash "\$PERSIST_ROOT/.happycapy/desktop/start-desktop.sh"
 EOF2
   if [ ! -s "$service_cmdf_tmp" ]; then
     rm -f "$service_cmdf_tmp" >/dev/null 2>&1 || true
@@ -3033,6 +3193,218 @@ configure_sshd() {
 
   if id -u "$SSH_USER" >/dev/null 2>&1; then
     printf '%s:%s\n' "$SSH_USER" "$SSH_PASSWORD" | run_root chpasswd || true
+  fi
+  return 0
+}
+
+resolve_user_home_dir() {
+  local user_name="$1"
+  local home_dir
+  home_dir=""
+  if [ -n "$user_name" ] && command -v getent >/dev/null 2>&1; then
+    home_dir="$(getent passwd "$user_name" 2>/dev/null | awk -F: '{print $6}' | head -n1 || true)"
+  fi
+  if [ -z "$home_dir" ] && [ -n "$user_name" ]; then
+    home_dir="$(eval "printf '%s' ~${user_name}" 2>/dev/null || true)"
+  fi
+  if [ -z "$home_dir" ]; then
+    home_dir="$HOME"
+  fi
+  printf '%s\n' "$home_dir"
+}
+
+download_file_atomic() {
+  local url="$1"
+  local dest="$2"
+  local tmpf
+  [ -n "$url" ] || return 1
+  [ -n "$dest" ] || return 1
+  mkdir -p "$(dirname "$dest")" >/dev/null 2>&1 || true
+  tmpf="$(mktemp "/tmp/hc-fetch.XXXXXX")"
+  if with_retry 3 curl -fsSL --retry 2 --retry-delay 1 --retry-connrefused "$url" -o "$tmpf" >/dev/null 2>&1; then
+    mv -f "$tmpf" "$dest"
+    return 0
+  fi
+  rm -f "$tmpf" >/dev/null 2>&1 || true
+  return 1
+}
+
+ensure_git_zsh_installed() {
+  local rc_update rc_install
+  if command -v git >/dev/null 2>&1 && command -v zsh >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! can_root; then
+    install_log "shell_deps_skip reason=no_root has_git=$([ -x "$(command -v git || true)" ] && echo 1 || echo 0) has_zsh=$([ -x "$(command -v zsh || true)" ] && echo 1 || echo 0)"
+    return 1
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    set +e
+    with_retry 2 run_root apt-get -o DPkg::Lock::Timeout=180 update -y >/tmp/hc-shell-deps-update.log 2>&1
+    rc_update=$?
+    with_retry 2 run_root env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 install -y git zsh >/tmp/hc-shell-deps-install.log 2>&1
+    rc_install=$?
+    set -e
+    install_log "shell_deps_install manager=apt rc_update=${rc_update} rc_install=${rc_install} update_log=/tmp/hc-shell-deps-update.log install_log=/tmp/hc-shell-deps-install.log"
+  elif command -v apk >/dev/null 2>&1; then
+    set +e
+    with_retry 2 run_root apk add --no-cache git zsh >/tmp/hc-shell-deps-install.log 2>&1
+    rc_install=$?
+    set -e
+    install_log "shell_deps_install manager=apk rc_install=${rc_install} install_log=/tmp/hc-shell-deps-install.log"
+  elif command -v yum >/dev/null 2>&1; then
+    set +e
+    with_retry 2 run_root yum install -y git zsh >/tmp/hc-shell-deps-install.log 2>&1
+    rc_install=$?
+    set -e
+    install_log "shell_deps_install manager=yum rc_install=${rc_install} install_log=/tmp/hc-shell-deps-install.log"
+  fi
+  command -v git >/dev/null 2>&1 && command -v zsh >/dev/null 2>&1
+}
+
+shell_profile_is_ready() {
+  local home_dir="$1"
+  local marker_ver
+  [ -n "$home_dir" ] || return 1
+  [ -s "${home_dir}/.bashrc" ] || return 1
+  [ -s "${home_dir}/.zshrc" ] || return 1
+  [ -s "${home_dir}/.p10k.zsh" ] || return 1
+  [ -d "${home_dir}/.oh-my-zsh" ] || return 1
+  [ -d "${home_dir}/.oh-my-zsh/custom/themes/powerlevel10k" ] || return 1
+  marker_ver="$(cat "$SHELL_PROFILE_MARKER" 2>/dev/null | head -n1 | tr -d '\r' || true)"
+  [ "$marker_ver" = "$SHELL_PROFILE_VERSION" ]
+}
+
+mark_shell_profile_ready() {
+  mkdir -p "$(dirname "$SHELL_PROFILE_MARKER")" >/dev/null 2>&1 || true
+  printf '%s\n' "$SHELL_PROFILE_VERSION" > "$SHELL_PROFILE_MARKER" 2>/dev/null || true
+}
+
+bootstrap_shell_profile_for_user() {
+  local home_dir="$1"
+  local user_name="${2:-}"
+  local installer p10k_dir bashrc zshrc p10krc rc
+  [ -n "$home_dir" ] || return 1
+  bashrc="${home_dir}/.bashrc"
+  zshrc="${home_dir}/.zshrc"
+  p10krc="${home_dir}/.p10k.zsh"
+  install_log "shell_profile_setup_begin home=${home_dir}"
+
+  installer="/tmp/hc-ohmyzsh-install.sh"
+  if ! download_file_atomic "$OHMYZSH_INSTALL_URL" "$installer"; then
+    install_log "shell_profile_setup_fail step=download_ohmyzsh_installer url=${OHMYZSH_INSTALL_URL}"
+    return 1
+  fi
+
+  rm -rf "${home_dir}/.oh-my-zsh" >/dev/null 2>&1 || true
+  set +e
+  unset REPO REMOTE BRANCH
+  printf 'y\n' | env HOME="$home_dir" ZSH="${home_dir}/.oh-my-zsh" RUNZSH=no CHSH=no KEEP_ZSHRC=yes sh "$installer" >/tmp/hc-ohmyzsh-install.log 2>&1
+  rc=$?
+  set -e
+  rm -f "$installer" >/dev/null 2>&1 || true
+  if [ "$rc" -ne 0 ]; then
+    install_log "shell_profile_setup_fail step=install_ohmyzsh rc=${rc} log=/tmp/hc-ohmyzsh-install.log"
+    return 1
+  fi
+
+  p10k_dir="${home_dir}/.oh-my-zsh/custom/themes/powerlevel10k"
+  rm -rf "$p10k_dir" >/dev/null 2>&1 || true
+  set +e
+  git clone --depth=1 "$P10K_REPO_URL" "$p10k_dir" >/tmp/hc-p10k-install.log 2>&1
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    install_log "shell_profile_setup_fail step=install_p10k rc=${rc} repo=${P10K_REPO_URL} log=/tmp/hc-p10k-install.log"
+    return 1
+  fi
+
+  if ! download_file_atomic "$DOTFILE_BASHRC_URL" "$bashrc"; then
+    install_log "shell_profile_setup_fail step=download_dotfile name=.bashrc url=${DOTFILE_BASHRC_URL}"
+    return 1
+  fi
+  if ! download_file_atomic "$DOTFILE_ZSHRC_URL" "$zshrc"; then
+    install_log "shell_profile_setup_fail step=download_dotfile name=.zshrc url=${DOTFILE_ZSHRC_URL}"
+    return 1
+  fi
+  if ! download_file_atomic "$DOTFILE_P10K_URL" "$p10krc"; then
+    install_log "shell_profile_setup_fail step=download_dotfile name=.p10k.zsh url=${DOTFILE_P10K_URL}"
+    return 1
+  fi
+
+  if [ -n "$user_name" ] && id -u "$user_name" >/dev/null 2>&1 && can_root; then
+    run_root chown -R "$user_name":"$user_name" "${home_dir}/.oh-my-zsh" >/dev/null 2>&1 || true
+    run_root chown "$user_name":"$user_name" "$bashrc" "$zshrc" "$p10krc" >/dev/null 2>&1 || true
+  fi
+
+  mark_shell_profile_ready
+  install_log "shell_profile_setup_end home=${home_dir} ohmyzsh=1 p10k=1"
+  return 0
+}
+
+upsert_shell_defaults_block() {
+  local rc_file="$1"
+  local begin_marker end_marker tmpf
+  [ -n "$rc_file" ] || return 1
+  begin_marker="# >>> happycapy-term-defaults >>>"
+  end_marker="# <<< happycapy-term-defaults <<<"
+  mkdir -p "$(dirname "$rc_file")" >/dev/null 2>&1 || true
+  [ -f "$rc_file" ] || : > "$rc_file"
+  tmpf="$(mktemp "/tmp/hc-shell-defaults.XXXXXX")"
+  awk -v b="$begin_marker" -v e="$end_marker" '
+    $0 == b {skip=1; next}
+    $0 == e {skip=0; next}
+    !skip {print}
+  ' "$rc_file" > "$tmpf" 2>/dev/null || cp -f "$rc_file" "$tmpf"
+  cat >> "$tmpf" <<'EOF'
+# >>> happycapy-term-defaults >>>
+if [ -t 1 ]; then
+  export COLUMNS="${COLUMNS:-240}"
+  export LINES="${LINES:-60}"
+  if command -v stty >/dev/null 2>&1; then
+    _hc_sz="$(stty size 2>/dev/null || true)"
+    _hc_rows="$(printf '%s' "$_hc_sz" | awk '{print $1}')"
+    _hc_cols="$(printf '%s' "$_hc_sz" | awk '{print $2}')"
+    case "${_hc_rows:-0}" in ''|*[!0-9]*) _hc_rows=0 ;; esac
+    case "${_hc_cols:-0}" in ''|*[!0-9]*) _hc_cols=0 ;; esac
+    if [ "$_hc_cols" -gt 0 ] && [ "$_hc_cols" -lt 200 ]; then
+      stty cols 220 >/dev/null 2>&1 || true
+    fi
+    if [ "$_hc_rows" -gt 0 ] && [ "$_hc_rows" -lt 45 ]; then
+      stty rows 55 >/dev/null 2>&1 || true
+    fi
+    unset _hc_sz _hc_rows _hc_cols
+  fi
+  alias ps='ps -ww'
+fi
+# <<< happycapy-term-defaults <<<
+EOF
+  mv -f "$tmpf" "$rc_file"
+  return 0
+}
+
+ensure_shell_defaults_for_user() {
+  local user_name="$1"
+  local home_dir bashrc zshrc p10krc
+  home_dir="$(resolve_user_home_dir "$user_name")"
+  [ -n "$home_dir" ] || return 1
+
+  ensure_git_zsh_installed || true
+  if command -v git >/dev/null 2>&1 && command -v zsh >/dev/null 2>&1; then
+    if ! shell_profile_is_ready "$home_dir"; then
+      bootstrap_shell_profile_for_user "$home_dir" "$user_name" || true
+    fi
+  fi
+
+  bashrc="${home_dir}/.bashrc"
+  zshrc="${home_dir}/.zshrc"
+  p10krc="${home_dir}/.p10k.zsh"
+  upsert_shell_defaults_block "$bashrc" || true
+  upsert_shell_defaults_block "$zshrc" || true
+  if id -u "$user_name" >/dev/null 2>&1; then
+    if can_root; then
+      run_root chown "$user_name":"$user_name" "$bashrc" "$zshrc" "$p10krc" >/dev/null 2>&1 || true
+    fi
   fi
   return 0
 }
@@ -4627,7 +4999,11 @@ watchdog_loop() {
       fi
       if [ "$KEEPALIVE_MODE" = "vnc-browser" ] && [ "$KEEPALIVE_INTERVAL_SEC" -gt 0 ] && [ "$now_ts" -gt 0 ]; then
         keepalive_due=0
-        if [ "$keepalive_triggered" -eq 1 ] || [ "$keepalive_last_ts" -eq 0 ] || [ $((now_ts - keepalive_last_ts)) -ge "$KEEPALIVE_INTERVAL_SEC" ]; then
+        # Health-driven policy for vnc-browser:
+        # - first tick (boot) or explicit trigger runs one keepalive tick
+        # - routine refresh is driven by health probe (unhealthy -> force refresh)
+        # This avoids blind periodic reload every KEEPALIVE_INTERVAL_SEC.
+        if [ "$keepalive_triggered" -eq 1 ] || [ "$keepalive_last_ts" -eq 0 ]; then
           keepalive_due=1
         fi
         keepalive_pid_alive=0
@@ -4801,6 +5177,9 @@ else
   fi
 fi
 
+# Apply interactive shell defaults even on fast pre-recover path.
+ensure_shell_defaults_for_user "$SSH_USER" || true
+
 if [ "$WATCHDOG_MODE" -ne 1 ] && [ "${HAPPYCAPY_RECOVER_CHAIN:-0}" != "1" ] && [ -n "$RECOVER_EXISTING" ]; then
   set +e
   HAPPYCAPY_RECOVER_CHAIN=1 bash "$RECOVER_EXISTING"
@@ -4884,6 +5263,7 @@ if ! configure_sshd; then
   emit_error "failed to install/configure sshd"
   exit 1
 fi
+ensure_shell_defaults_for_user "$SSH_USER" || true
 
 BOOT_WRITER="$(write_reporter || true)"
 if [ -z "$BOOT_WRITER" ] || [ ! -x "$BOOT_WRITER" ]; then
