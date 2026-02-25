@@ -98,6 +98,17 @@ WATCHDOG_MODE=0
 case "$WATCHDOG_MODE_RAW" in
   1|true|yes|on) WATCHDOG_MODE=1 ;;
 esac
+SKIP_CORE_INSTALL_RAW="$(printf '%s' "${HAPPYCAPY_SKIP_CORE_INSTALL:-}" | tr '[:upper:]' '[:lower:]')"
+SKIP_CORE_INSTALL=0
+case "$SKIP_CORE_INSTALL_RAW" in
+  1|true|yes|on) SKIP_CORE_INSTALL=1 ;;
+  0|false|no|off) SKIP_CORE_INSTALL=0 ;;
+esac
+# Watchdog worker is a steady-state maintainer. Core dependency install should
+# happen in normal bootstrap/autorestore paths to avoid apt/dpkg lock races.
+if [ "$WATCHDOG_MODE" -eq 1 ] && [ -z "${HAPPYCAPY_SKIP_CORE_INSTALL:-}" ]; then
+  SKIP_CORE_INSTALL=1
+fi
 WATCHDOG_INTERVAL_RAW="${HAPPYCAPY_WATCHDOG_INTERVAL_SEC:-8}"
 case "$WATCHDOG_INTERVAL_RAW" in
   ''|*[!0-9.]*)
@@ -1087,8 +1098,15 @@ for item in data:
     if not isinstance(item, dict):
         continue
     item_id = str(item.get("id", "") or "").strip()
+    item_type = str(item.get("type", "") or "").strip().lower()
     item_url = str(item.get("url", "") or "").strip()
-    if item_id and item_url.startswith(base):
+    if item_type and item_type != "page":
+        continue
+    is_noise = (
+        item_url.startswith("chrome-error://")
+        or item_url in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")
+    )
+    if item_id and (item_url.startswith(base) or is_noise):
         print(item_id)
 PY
     )"
@@ -1135,8 +1153,15 @@ for item in data:
     if not isinstance(item, dict):
         continue
     tid = str(item.get("id", "") or "").strip()
+    ttype = str(item.get("type", "") or "").strip().lower()
     url = str(item.get("url", "") or "").strip()
-    if tid and url.startswith(base):
+    if ttype and ttype != "page":
+        continue
+    is_noise = (
+        url.startswith("chrome-error://")
+        or url in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")
+    )
+    if tid and (url.startswith(base) or is_noise):
         tabs.append((tid, url))
 out["before"] = len(tabs)
 if len(tabs) <= 1:
@@ -1152,6 +1177,14 @@ for tid, url in tabs:
 if not keep:
     for tid, url in tabs:
         if "reconnect=1" in url and "path=websockify" in url:
+            keep = tid
+            break
+if not keep:
+    for tid, url in tabs:
+        if not (
+            url.startswith("chrome-error://")
+            or url in ("about:blank", "chrome://newtab/", "chrome://new-tab-page/")
+        ):
             keep = tid
             break
 if not keep:
@@ -1270,7 +1303,7 @@ verify_vnc_browser_refresh_health() {
         keepalive_state_set last_health_probe_mode dom_content
         keepalive_state_set last_health_probe_reason dom_probe_unavailable
         keepalive_log "vnc_browser_dom_probe_unavailable url=${vnc_url}"
-        break
+        return 1
         ;;
       1)
         keepalive_state_set last_health_probe_ok 0
@@ -2746,11 +2779,11 @@ start_watchdog_worker_detached() {
     return 0
   fi
 
-  # Avoid apt/dpkg lock races: watchdog startup path also runs core install.
-  # Wait a short window for detached autorestore worker to finish first.
-  wait_sec="${HAPPYCAPY_AUTORESTORE_START_WAIT_SEC:-240}"
+  # Optional grace window for autorestore worker; default is 0 to avoid
+  # delaying bootstrap exit and holding orchestration locks.
+  wait_sec="${HAPPYCAPY_AUTORESTORE_START_WAIT_SEC:-0}"
   case "$wait_sec" in
-    ''|*[!0-9]*) wait_sec=240 ;;
+    ''|*[!0-9]*) wait_sec=0 ;;
   esac
   wait_left="$wait_sec"
   if autorestore_worker_running; then
@@ -4663,8 +4696,15 @@ else
     if is_port_listening "$SSH_PORT"; then p2222=1; fi
     p8080=0
     if is_port_listening 8080; then p8080=1; fi
-    if [ "$p2222" -eq 1 ] && [ "$p8080" -eq 1 ]; then
-      printf '{"status":"ok","message":"bootstrap_lock_busy","p2222":%s,"p8080":%s}\n' "$p2222" "$p8080"
+    pcontrol=0
+    if [ "$CONTROL_API_REQUIRED" -eq 1 ] && is_port_listening "$CONTROL_PORT"; then
+      pcontrol=1
+    fi
+    if [ "$CONTROL_API_REQUIRED" -eq 0 ]; then
+      pcontrol=1
+    fi
+    if [ "$p2222" -eq 1 ] && [ "$p8080" -eq 1 ] && [ "$pcontrol" -eq 1 ]; then
+      printf '{"status":"ok","message":"bootstrap_lock_busy","p2222":%s,"p8080":%s,"pcontrol":%s}\n' "$p2222" "$p8080" "$pcontrol"
       exit 0
     fi
     if acquire_bootstrap_lock; then
@@ -4689,7 +4729,11 @@ if [ -z "$RECOVER_SCRIPT" ] || [ ! -x "$RECOVER_SCRIPT" ]; then
   exit 1
 fi
 
-install_packages
+if [ "$SKIP_CORE_INSTALL" -eq 1 ]; then
+  install_log "core_install_skip reason=skip_core_install watchdog_mode=${WATCHDOG_MODE}"
+else
+  install_packages
+fi
 
 if ! command -v curl >/dev/null 2>&1; then
   emit_error "curl not found"
@@ -4875,6 +4919,10 @@ fi
 if [ "$WATCHDOG_MODE" -eq 1 ]; then
   watchdog_loop "$WATCHDOG_INTERVAL_SEC"
 else
+  # Worker startup may wait; release lock early so recover/bootstrap calls are
+  # not blocked by detached worker orchestration.
+  release_bootstrap_lock || true
+  trap - EXIT INT TERM
   # Run restore first in background, then let watchdog maintain steady-state.
   # Watchdog will skip restore while worker is alive to avoid apt/dpkg lock races.
   start_autorestore_worker_detached || true
