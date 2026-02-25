@@ -261,6 +261,21 @@ case "$KEEPALIVE_BROWSER_RAW" in
   chromium|chromium-browser|chrome|google-chrome|google-chrome-stable) KEEPALIVE_BROWSER="chromium" ;;
   firefox) KEEPALIVE_BROWSER="firefox" ;;
 esac
+KEEPALIVE_BROWSER_NICE_RAW="${HAPPYCAPY_KEEPALIVE_BROWSER_NICE:-10}"
+case "$KEEPALIVE_BROWSER_NICE_RAW" in
+  ''|*[!0-9-]*|*--*)
+    KEEPALIVE_BROWSER_NICE=10
+    ;;
+  *)
+    KEEPALIVE_BROWSER_NICE="$KEEPALIVE_BROWSER_NICE_RAW"
+    ;;
+esac
+if [ "$KEEPALIVE_BROWSER_NICE" -lt -20 ] 2>/dev/null; then
+  KEEPALIVE_BROWSER_NICE=-20
+fi
+if [ "$KEEPALIVE_BROWSER_NICE" -gt 19 ] 2>/dev/null; then
+  KEEPALIVE_BROWSER_NICE=19
+fi
 KEEPALIVE_BROWSER_VISIBLE_RAW="$(printf '%s' "${HAPPYCAPY_KEEPALIVE_BROWSER_VISIBLE:-1}" | tr '[:upper:]' '[:lower:]')"
 KEEPALIVE_BROWSER_VISIBLE=0
 case "$KEEPALIVE_BROWSER_VISIBLE_RAW" in
@@ -945,6 +960,81 @@ find_browser_bin() {
   return 1
 }
 
+launch_keepalive_browser() {
+  local browser_bin="$1"
+  local vnc_url="$2"
+  local browser_name use_nice
+  browser_name="$(basename "$browser_bin")"
+  use_nice=0
+  if [ "$KEEPALIVE_BROWSER_NICE" -ne 0 ] 2>/dev/null && command -v nice >/dev/null 2>&1; then
+    use_nice=1
+  fi
+  if [ "$browser_name" = "firefox" ]; then
+    if [ "$use_nice" -eq 1 ]; then
+      nohup env DISPLAY="$KEEPALIVE_DISPLAY" nice -n "$KEEPALIVE_BROWSER_NICE" \
+        "$browser_bin" --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+    else
+      nohup env DISPLAY="$KEEPALIVE_DISPLAY" \
+        "$browser_bin" --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+    fi
+    return 0
+  fi
+  if [ "$use_nice" -eq 1 ]; then
+    nohup env DISPLAY="$KEEPALIVE_DISPLAY" nice -n "$KEEPALIVE_BROWSER_NICE" \
+      "$browser_bin" \
+      --disable-gpu \
+      --disable-dev-shm-usage \
+      --disable-background-networking \
+      --disable-renderer-backgrounding \
+      --disable-backgrounding-occluded-windows \
+      --disable-breakpad \
+      --disable-component-update \
+      --disable-default-apps \
+      --disable-domain-reliability \
+      --disable-extensions \
+      --disable-features=Translate,MediaRouter,OptimizationHints \
+      --disable-sync \
+      --metrics-recording-only \
+      --mute-audio \
+      --no-default-browser-check \
+      --no-first-run \
+      --no-pings \
+      --password-store=basic \
+      --window-size=1366,768 \
+      --remote-debugging-port="$KEEPALIVE_CDP_PORT" \
+      --user-data-dir="$KEEPALIVE_PROFILE_DIR" \
+      --new-window \
+      "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+  else
+    nohup env DISPLAY="$KEEPALIVE_DISPLAY" \
+      "$browser_bin" \
+      --disable-gpu \
+      --disable-dev-shm-usage \
+      --disable-background-networking \
+      --disable-renderer-backgrounding \
+      --disable-backgrounding-occluded-windows \
+      --disable-breakpad \
+      --disable-component-update \
+      --disable-default-apps \
+      --disable-domain-reliability \
+      --disable-extensions \
+      --disable-features=Translate,MediaRouter,OptimizationHints \
+      --disable-sync \
+      --metrics-recording-only \
+      --mute-audio \
+      --no-default-browser-check \
+      --no-first-run \
+      --no-pings \
+      --password-store=basic \
+      --window-size=1366,768 \
+      --remote-debugging-port="$KEEPALIVE_CDP_PORT" \
+      --user-data-dir="$KEEPALIVE_PROFILE_DIR" \
+      --new-window \
+      "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+  fi
+  return 0
+}
+
 stop_keepalive_browser() {
   local pid
   pid=0
@@ -1132,22 +1222,7 @@ start_vnc_browser_keepalive() {
   mkdir -p "$(dirname "$KEEPALIVE_PID_FILE")" "$(dirname "$KEEPALIVE_URL_PATH")" "$KEEPALIVE_PROFILE_DIR"
   if [ "$desired_visible" -eq 1 ]; then
     cleanup_keepalive_runtime_conflicts
-    if [ "$browser_name" = "firefox" ]; then
-      nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
-    else
-      nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" \
-        --disable-gpu \
-        --disable-dev-shm-usage \
-        --disable-background-networking \
-        --disable-renderer-backgrounding \
-        --no-first-run \
-        --no-default-browser-check \
-        --window-size=1366,768 \
-        --remote-debugging-port="$KEEPALIVE_CDP_PORT" \
-        --user-data-dir="$KEEPALIVE_PROFILE_DIR" \
-        --new-window \
-        "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
-    fi
+    launch_keepalive_browser "$browser_bin" "$vnc_url"
     pid="$!"
     sleep 0.5
     if kill -0 "$pid" >/dev/null 2>&1; then
@@ -1156,26 +1231,11 @@ start_vnc_browser_keepalive() {
       printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
       ensure_keepalive_window_workspace_retry "$pid" 60 0.15 || true
       keepalive_state_mark_refresh "launch_visible" "$vnc_url" 1
-      keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} mode=visible display=${KEEPALIVE_DISPLAY} url=${vnc_url}"
+      keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} mode=visible display=${KEEPALIVE_DISPLAY} nice=${KEEPALIVE_BROWSER_NICE} url=${vnc_url}"
       return 0
     fi
     cleanup_keepalive_runtime_conflicts
-    if [ "$browser_name" = "firefox" ]; then
-      nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
-    else
-      nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" \
-        --disable-gpu \
-        --disable-dev-shm-usage \
-        --disable-background-networking \
-        --disable-renderer-backgrounding \
-        --no-first-run \
-        --no-default-browser-check \
-        --window-size=1366,768 \
-        --remote-debugging-port="$KEEPALIVE_CDP_PORT" \
-        --user-data-dir="$KEEPALIVE_PROFILE_DIR" \
-        --new-window \
-        "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
-    fi
+    launch_keepalive_browser "$browser_bin" "$vnc_url"
     pid="$!"
     sleep 0.5
     if kill -0 "$pid" >/dev/null 2>&1; then
@@ -1184,7 +1244,7 @@ start_vnc_browser_keepalive() {
       printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
       ensure_keepalive_window_workspace_retry "$pid" 60 0.15 || true
       keepalive_state_mark_refresh "launch_visible_retry" "$vnc_url" 1
-      keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} mode=visible-retry display=${KEEPALIVE_DISPLAY} url=${vnc_url}"
+      keepalive_log "vnc_browser_ok pid=${pid} browser=${browser_name} mode=visible-retry display=${KEEPALIVE_DISPLAY} nice=${KEEPALIVE_BROWSER_NICE} url=${vnc_url}"
       return 0
     fi
   fi
@@ -1204,7 +1264,7 @@ reload_vnc_browser_keepalive_url() {
   local browser_name enc_url
   browser_name="$(basename "$browser_bin")"
   if [ "$browser_name" = "firefox" ]; then
-    nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+    launch_keepalive_browser "$browser_bin" "$vnc_url"
     printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
     keepalive_state_mark_refresh "reload_firefox_cli" "$vnc_url" 1
     keepalive_log "vnc_browser_reload_ok browser=${browser_name} mode=firefox_cli url=${vnc_url}"
@@ -1229,7 +1289,7 @@ PY
     dedupe_vnc_browser_tabs "$vnc_url" || true
     return 0
   fi
-  nohup env DISPLAY="$KEEPALIVE_DISPLAY" "$browser_bin" --new-window "$vnc_url" >>"$KEEPALIVE_BROWSER_LOG" 2>&1 &
+  launch_keepalive_browser "$browser_bin" "$vnc_url"
   sleep 0.3
   printf '%s\n' "$vnc_url" > "$KEEPALIVE_URL_PATH"
   keepalive_state_mark_refresh "reload_cli_fallback" "$vnc_url" 1
