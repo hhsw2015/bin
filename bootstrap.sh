@@ -2905,7 +2905,7 @@ if [ "$WORK_TERM_PID" -gt 0 ] 2>/dev/null && kill -0 "$WORK_TERM_PID" >/dev/null
 else
   TERM_CMD=""
   if command -v xterm >/dev/null 2>&1; then
-    TERM_CMD="xterm -geometry 100x30+40+40"
+    TERM_CMD="xterm -geometry 100x42+40+40"
   elif command -v x-terminal-emulator >/dev/null 2>&1; then
     TERM_CMD="x-terminal-emulator"
   elif command -v lxterminal >/dev/null 2>&1; then
@@ -3390,21 +3390,26 @@ upsert_shell_defaults_block() {
   cat >> "$tmpf" <<'EOF'
 # >>> happycapy-term-defaults >>>
 if [ -t 1 ]; then
-  export COLUMNS="${COLUMNS:-240}"
-  export LINES="${LINES:-60}"
   if command -v stty >/dev/null 2>&1; then
     _hc_sz="$(stty size 2>/dev/null || true)"
     _hc_rows="$(printf '%s' "$_hc_sz" | awk '{print $1}')"
     _hc_cols="$(printf '%s' "$_hc_sz" | awk '{print $2}')"
     case "${_hc_rows:-0}" in ''|*[!0-9]*) _hc_rows=0 ;; esac
     case "${_hc_cols:-0}" in ''|*[!0-9]*) _hc_cols=0 ;; esac
-    if [ "$_hc_cols" -gt 0 ] && [ "$_hc_cols" -lt 200 ]; then
-      stty cols 220 >/dev/null 2>&1 || true
+    if [ "$_hc_cols" -gt 0 ] && [ "$_hc_rows" -gt 0 ]; then
+      export COLUMNS="$_hc_cols"
+      export LINES="$_hc_rows"
+    else
+      export COLUMNS="${COLUMNS:-200}"
+      export LINES="${LINES:-55}"
     fi
-    if [ "$_hc_rows" -gt 0 ] && [ "$_hc_rows" -lt 45 ]; then
-      stty rows 55 >/dev/null 2>&1 || true
+    if [ -n "${BASH_VERSION:-}" ]; then
+      shopt -s checkwinsize >/dev/null 2>&1 || true
     fi
     unset _hc_sz _hc_rows _hc_cols
+  else
+    export COLUMNS="${COLUMNS:-200}"
+    export LINES="${LINES:-55}"
   fi
   alias ps='ps -ww'
 fi
